@@ -1,5 +1,5 @@
 # Movie-Recommendation-System
-1) choix du dataset: https://grouplens.org/datasets/movielens/ ml-latest-small.zip
+1) choix du dataset: https://grouplens.org/datasets/movielens/ (ml-latest-small.zip)
 2) Document de spécifications fonctionnelles : 
 
 Objectif : recommander films via hybride (content + collaborative).
@@ -20,3 +20,15 @@ Architecture (proposition) : Python backend (FastAPI) + modèle entraîné (pick
 
 Plan de livrables & échéances : dataset, EDA, modèle baseline (cosine TF-IDF), modèle collab (SVD Surprise), UI Streamlit, rapport.
 (Mets ces items dans un doc Word / Markdown.)
+
+
+## 📦 Required Packages
+
+This project uses the following Python libraries:
+
+- **pandas** — data manipulation
+- **numpy** — numerical operations
+- **scikit-learn** — ML algorithms (TF-IDF, KNN, etc.)
+- **scikit-surprise** — collaborative filtering (SVD, KNNBaseline)
+- **matplotlib** — visualizations for EDA
+- **streamlit** — simple web interface for the recommender demo
