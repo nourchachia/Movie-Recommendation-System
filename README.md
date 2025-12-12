@@ -29,6 +29,6 @@ This project uses the following Python libraries:
 - **pandas** — data manipulation
 - **numpy** — numerical operations
 - **scikit-learn** — ML algorithms (TF-IDF, KNN, etc.)
-- **scikit-surprise** — collaborative filtering (SVD, KNNBaseline)
+- **scikit-surprise** — collaborative filtering (SVD, KNNBaseline)   ///depuis conda-forge
 - **matplotlib** — visualizations for EDA
 - **streamlit** — simple web interface for the recommender demo
