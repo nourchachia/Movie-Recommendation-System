@@ -1,0 +1,2 @@
+# Add these to requirements.txt or install manually
+scikit-surprise>=1.1.3
