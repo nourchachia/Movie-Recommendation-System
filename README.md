@@ -59,3 +59,10 @@ matplotlib — visualizations for EDA
 streamlit — simple web interface for the recommender demo
 
 
+
+This project implements a movie recommendation system.
+The first version is based on content-based filtering using movie genres
+and cosine similarity.
+Collaborative filtering using user ratings will be added in future versions.
+
+
