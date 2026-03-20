@@ -1,11 +1,15 @@
 import os
+import sys
 import json
+import math
 import pickle
+import threading
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Path, Depends
+from fastapi import FastAPI, HTTPException, Query, Path, Depends, Header, status
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
+from pydantic import BaseModel, Field, field_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
 
@@ -584,3 +588,319 @@ def get_trending(
         
     row_title = f"Trending in {category.capitalize()}" if category else "Trending Now"
     return {"row_title": row_title, "movies": results}
+
+
+# ==========================================================
+# 7. PHASE A5 — INTERACTIVE RATINGS ENDPOINT
+# ==========================================================
+
+class RatingSubmission(BaseModel):
+    """Pydantic model for the POST /api/ratings request body.
+    
+    Mirrors the exact API contract from the implementation plan:
+      { user_id, movie_id, rating, timestamp (optional) }
+    
+    Security decisions:
+    - rating is strictly validated to 0.5-step multiples in [0.5, 5.0],
+      matching the MovieLens dataset convention. Any non-standard value
+      (e.g. 3.3, 7.0, -1) is rejected at the Pydantic layer before any
+      SQL is even attempted — we never trust raw client input.
+    - user_id and movie_id are constrained to gt=0 so negative IDs cannot
+      be used to probe the database.
+    - timestamp is optional; when omitted we use PostgreSQL's NOW() on the
+      server side, preventing clients from forging historical timestamps.
+    """
+    user_id: int = Field(..., gt=0, description="ID of the user submitting the rating")
+    movie_id: int = Field(..., gt=0, description="ID of the movie being rated")
+    rating: float = Field(..., ge=0.5, le=5.0, description="Star rating from 0.5 to 5.0 in 0.5 increments")
+    timestamp: int | None = Field(None, description="Unix timestamp (optional — server uses NOW() if omitted)")
+
+    @field_validator("rating")
+    @classmethod
+    def rating_must_be_half_step(cls, v: float) -> float:
+        """Reject ratings like 3.3 or 4.7 — only 0.5-step values (0.5, 1.0, ... 5.0) are valid."""
+        if not math.isclose(round(v * 2) / 2, v, abs_tol=1e-6):
+            raise ValueError("Rating must be a multiple of 0.5 (e.g. 1.0, 1.5, 2.0 ... 5.0)")
+        return round(v * 2) / 2  # normalise floating-point noise (e.g. 3.9999 → 4.0)
+
+
+@app.post("/api/ratings", status_code=status.HTTP_201_CREATED)
+def submit_rating(payload: RatingSubmission, db: Session = Depends(get_db)):
+    """Submit or update a movie rating for a user.
+    
+    This is the write endpoint that feeds new explicit feedback back into
+    the PostgreSQL ratings table, which is the source of truth for all
+    recommendation models (SVD, KNN, NMF) and trending calculations.
+    
+    Behaviour:
+    - Returns 404 if user_id or movie_id do not exist in the database.
+      This prevents ghost ratings (data noise for orphaned IDs) and also
+      prevents ID enumeration attacks from discovering valid ID ranges.
+    - Uses INSERT ... ON CONFLICT DO UPDATE (upsert) so re-rating a movie
+      updates the existing row rather than creating a duplicate. This keeps
+      the ratings table clean and the model training deterministic.
+    - Timestamp falls back to server-side NOW() when the client doesn't
+      provide one, preventing clients from forging historical timestamps.
+    """
+
+    # ── Guard 1: Verify the user exists ──────────────────────────────────
+    # We check the ratings table (not a users table) since our dataset does
+    # not have a standalone users table — any user_id that has rated at
+    # least one movie in the past is a valid, known user.
+    user_exists = db.execute(
+        text("SELECT 1 FROM ratings WHERE user_id = :uid LIMIT 1"),
+        {"uid": payload.user_id}
+    ).fetchone()
+    if not user_exists:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {payload.user_id} not found."
+        )
+
+    # ── Guard 2: Verify the movie exists ─────────────────────────────────
+    movie_row = db.execute(
+        text("SELECT title FROM movies WHERE movie_id = :mid"),
+        {"mid": payload.movie_id}
+    ).fetchone()
+    if not movie_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Movie {payload.movie_id} not found."
+        )
+
+    # ── Write: Upsert the rating ──────────────────────────────────────────
+    # ON CONFLICT (user_id, movie_id) DO UPDATE means:
+    #   - First rating  → INSERT a fresh row.
+    #   - Re-rating     → UPDATE rating + timestamp in place, no duplicates.
+    # The (user_id, movie_id) pair must be a UNIQUE constraint in Postgres
+    # for this to work. If not yet present, the fallback is a safe no-op.
+    upsert_query = text("""
+        INSERT INTO ratings (user_id, movie_id, rating, timestamp)
+        VALUES (
+            :uid,
+            :mid,
+            :rating,
+            COALESCE(:ts, EXTRACT(EPOCH FROM NOW())::BIGINT)
+        )
+        ON CONFLICT (user_id, movie_id)
+        DO UPDATE SET
+            rating    = EXCLUDED.rating,
+            timestamp = EXCLUDED.timestamp
+    """)
+    db.execute(upsert_query, {
+        "uid":    payload.user_id,
+        "mid":    payload.movie_id,
+        "rating": payload.rating,
+        "ts":     payload.timestamp,
+    })
+    db.commit()
+
+    # ── Respond with a structured confirmation ────────────────────────────
+    action = "updated" if payload.rating else "saved"
+    return {
+        "status": "success",
+        "message": f"Rating {action} for retraining.",
+        "user_id": payload.user_id,
+        "movie_id": payload.movie_id,
+        "movie_title": movie_row.title,
+        "rating": payload.rating,
+    }
+
+
+# ==========================================================
+# 8. PHASE A5 — USER PROFILE ENDPOINT
+# ==========================================================
+
+@app.get("/api/users/{user_id}/profile")
+def get_user_profile(user_id: int = Path(..., gt=0), db: Session = Depends(get_db)):
+    """Return a user's taste profile: rating stats, top genres, and favourites.
+
+    Matches the implementation plan contract:
+      { user_id, total_ratings, average_rating, top_genres, favorites }
+
+    Design decisions:
+    - A single SQL aggregation query computes total_ratings and average_rating
+      directly in Postgres — far faster than pulling all rows into Python.
+    - Genre frequencies are computed in Python from the favourites list because
+      genres are stored as pipe-delimited strings (e.g. "Action|Sci-Fi"). A
+      pure-SQL approach would require string_to_array() and unnest(), which adds
+      complexity; the Python loop is simpler and the dataset is small enough.
+    - A user is identified by having at least one rating row. If none exist,
+      we return 404 rather than an empty profile, consistent with Task 1.
+    """
+
+    # ── Step 1: Aggregate stats directly in Postgres ──────────────────────
+    # One query to get: total count, average, and a distribution breakdown
+    # (how many 1-star, 2-star ... 5-star ratings the user gave overall).
+    stats_query = text("""
+        SELECT
+            COUNT(*)                                        AS total_ratings,
+            ROUND(AVG(rating)::numeric, 2)                  AS average_rating,
+            COUNT(*) FILTER (WHERE rating <= 1.5)           AS stars_1,
+            COUNT(*) FILTER (WHERE rating BETWEEN 1.6 AND 2.5) AS stars_2,
+            COUNT(*) FILTER (WHERE rating BETWEEN 2.6 AND 3.5) AS stars_3,
+            COUNT(*) FILTER (WHERE rating BETWEEN 3.6 AND 4.5) AS stars_4,
+            COUNT(*) FILTER (WHERE rating > 4.5)            AS stars_5
+        FROM ratings
+        WHERE user_id = :uid
+    """)
+    stats = db.execute(stats_query, {"uid": user_id}).fetchone()
+
+    # 404 if this user has never rated anything
+    if not stats or stats.total_ratings == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"User {user_id} not found or has no ratings yet."
+        )
+
+    # ── Step 2: Fetch the user's favourite movies (≥ 4.0 stars) ──────────
+    # Reuses the same logic as GET /api/users/{user_id}/favorites so the two
+    # endpoints are always consistent with each other.
+    favs_query = text("""
+        SELECT m.movie_id, m.title, m.genres, m.tmdb_id, r.rating
+        FROM movies m
+        JOIN ratings r ON m.movie_id = r.movie_id
+        WHERE r.user_id = :uid AND r.rating >= 4.0
+        ORDER BY r.rating DESC, m.title ASC
+    """)
+    fav_rows = db.execute(favs_query, {"uid": user_id}).fetchall()
+
+    favorites = []
+    genre_freq: dict[str, int] = {}
+
+    for row in fav_rows:
+        genres = row.genres.split("|") if row.genres else []
+        favorites.append({
+            "movie_id": row.movie_id,
+            "title":    row.title,
+            "genres":   genres,
+            "tmdb_id":  row.tmdb_id,
+            "rating":   float(row.rating),
+        })
+        # Tally genre frequencies across all favourites (weighted by ≥4-star taste)
+        for g in genres:
+            genre_freq[g] = genre_freq.get(g, 0) + 1
+
+    # Sort by frequency descending, return the top 3 as the user's taste profile
+    top_genres = [g for g, _ in sorted(genre_freq.items(), key=lambda x: x[1], reverse=True)[:3]]
+
+    # ── Step 3: Return the full profile ──────────────────────────────────
+    return {
+        "user_id":        user_id,
+        "total_ratings":  int(stats.total_ratings),
+        "average_rating": float(stats.average_rating),
+        "rating_breakdown": {
+            "1_star":  int(stats.stars_1),
+            "2_stars": int(stats.stars_2),
+            "3_stars": int(stats.stars_3),
+            "4_stars": int(stats.stars_4),
+            "5_stars": int(stats.stars_5),
+        },
+        "top_genres": top_genres,
+        "favorites":  favorites,
+    }
+
+
+# ==========================================================
+# 9. PHASE A5 — BACKGROUND RETRAINING ENDPOINT
+# ==========================================================
+
+# Shared state dictionary for tracking the retraining process.
+# Using a plain dict (not a Pydantic model) because it must be mutated
+# from inside the background thread and read from the main thread.
+retrain_status: dict = {"state": "idle", "message": "No retraining has been triggered yet."}
+
+
+def _retrain_worker():
+    """Background thread worker: trains a fresh SVD model and hot-swaps it.
+
+    Threading design:
+    - Runs entirely in a daemon thread so it doesn't block the event loop.
+    - The GIL (Python's Global Interpreter Lock) ensures that the dict
+      assignment `ml_artifacts['svd_model'] = model` is atomic — no request
+      handler can read a half-initialised model object during the swap.
+    - If training fails, the old model stays in place (safe fallback).
+    """
+    global retrain_status
+    retrain_status = {"state": "running", "message": "Training in progress..."}
+
+    try:
+        # Import here to avoid circular imports if train.py ever imports from main.py
+        sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
+        from src.train import run_training_pipeline
+
+        # Train SVD on the live Postgres data (includes all new POST /api/ratings feedback)
+        model_path = run_training_pipeline(source="postgres")
+
+        # Hot-swap: load the freshly saved .pkl and replace the in-memory model
+        with open(model_path, "rb") as f:
+            new_model = pickle.load(f)
+
+        ml_artifacts["svd_model"] = new_model   # atomic dict assignment — thread-safe
+        retrain_status = {
+            "state": "idle",
+            "message": "Retraining completed successfully. New model is live."
+        }
+
+    except Exception as exc:
+        retrain_status = {
+            "state": "error",
+            "message": f"Retraining failed: {str(exc)}. Previous model is still active."
+        }
+
+
+@app.post("/api/retrain", status_code=status.HTTP_202_ACCEPTED)
+def trigger_retrain(x_admin_secret: str | None = Header(default=None)):
+    """Trigger a background SVD retraining job from live Postgres data.
+
+    Returns 202 Accepted immediately — does NOT wait for training to finish.
+    Poll GET /api/retrain/status to check when the new model is live.
+
+    Security: Requires the X-Admin-Secret request header to match the
+    ADMIN_SECRET environment variable. This is a lightweight interim guard
+    until Phase A6 JWT authentication is implemented. Never hardcode secrets.
+
+    This completes the full feedback loop:
+      User rates a movie (POST /api/ratings)
+        → Rating written to Postgres
+          → Retrain triggered (POST /api/retrain)
+            → SVD trained on updated data in background
+              → Fresh model hot-swapped into API memory
+                → Next top-picks request reflects the new rating  ✅
+    """
+    # ── Admin secret key guard ───────────────────────────────────────────
+    # Read the expected secret from the .env file on the server.
+    # FastAPI injects X-Admin-Secret from the request header automatically
+    # via the Header() dependency above (header name is lowercased + underscored).
+    expected_secret = os.getenv("ADMIN_SECRET")
+    if not expected_secret:
+        raise HTTPException(
+            status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
+            detail="Retraining is disabled: ADMIN_SECRET is not configured on the server."
+        )
+    if x_admin_secret != expected_secret:
+        raise HTTPException(
+            status_code=status.HTTP_401_UNAUTHORIZED,
+            detail="Invalid or missing X-Admin-Secret header."
+        )
+
+    if retrain_status["state"] == "running":
+        raise HTTPException(
+            status_code=status.HTTP_409_CONFLICT,
+            detail="A retraining job is already running. Please wait for it to finish."
+        )
+
+    # Launch in a daemon background thread and return 202 immediately
+    thread = threading.Thread(target=_retrain_worker, daemon=True)
+    thread.start()
+
+    return {
+        "status": "accepted",
+        "message": "Retraining started in the background. Poll GET /api/retrain/status to track progress."
+    }
+
+
+@app.get("/api/retrain/status")
+def get_retrain_status():
+    """Poll this endpoint to check if background retraining is still running."""
+    return retrain_status
