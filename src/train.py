@@ -20,11 +20,12 @@ def train_and_save():
     cosine_sim = cosine_similarity(tfidf_matrix, tfidf_matrix)
 
     # Collaborative filtering preparation
-    print("Training SVD model...")
+    print("Training the Champion Model (KNN Baseline)...")
+    from surprise import KNNBaseline
     reader = Reader(rating_scale=(0.5, 5.0))
     data = Dataset.load_from_df(ratings[['userId', 'movieId', 'rating']], reader)
     trainset = data.build_full_trainset()
-    model = SVD()
+    model = KNNBaseline(sim_options={'name': 'pearson_baseline', 'user_based': True})
     model.fit(trainset)
 
     # Saving artifacts
@@ -34,7 +35,7 @@ def train_and_save():
     with open("models/cosine_sim.pkl", "wb") as f:
         pickle.dump(cosine_sim, f)
     
-    with open("models/svd_model.pkl", "wb") as f:
+    with open("models/knn_model.pkl", "wb") as f:
         pickle.dump(model, f)
 
     movies.to_pickle("models/movies.pkl")
