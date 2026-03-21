@@ -1,17 +1,29 @@
 import os
 import sys
+import re
 import json
 import math
 import pickle
+import secrets
 import threading
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Path, Depends, Header, status
+from fastapi import FastAPI, HTTPException, Query, Path, Depends, Header, status, BackgroundTasks
+from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
 from dotenv import load_dotenv
-from pydantic import BaseModel, Field, field_validator
+from pydantic import BaseModel, Field, EmailStr, field_validator
 from sqlalchemy import create_engine, text
 from sqlalchemy.orm import sessionmaker, Session
+from backend.auth import (
+    hash_password, verify_password, validate_password_strength,
+    create_access_token, create_refresh_token, create_password_reset_token,
+    decode_access_token, decode_refresh_token, decode_reset_token,
+    generate_totp_secret, generate_totp_qr_base64, verify_totp_code
+)
+from backend.email_service import (
+    send_password_reset_email, send_2fa_code_email, send_welcome_email
+)
 
 # ==========================================================
 # 1. DATABASE CONFIGURATION (FastAPI best practice)
@@ -21,7 +33,10 @@ DB_URL = os.getenv("DATABASE_URL")
 if not DB_URL:
     raise ValueError("CRITICAL: DATABASE_URL is missing from environment variables!")
 
-engine = create_engine(DB_URL)
+# pool_pre_ping=True is CRITICAL for Neon.tech serverless Postgres.
+# It tests the connection before every query and transparently reconnects
+# if Neon dropped the idle connection to save resources.
+engine = create_engine(DB_URL, pool_pre_ping=True)
 SessionLocal = sessionmaker(autocommit=False, autoflush=False, bind=engine)
 
 # Dependency injection to get the DB connection separately for every single API request
@@ -76,9 +91,47 @@ def health_check():
 # 4. CORE NETFLIX ENDPOINTS (SQL ARCHITECTURE)
 # ==========================================================
 
+# ── Auth Dependency ────────────────────────────────────────────────────────────
+# HTTPBearer tells FastAPI to look for an "Authorization: Bearer <token>" header.
+# It makes Swagger UI show a simple text box where users can paste their JWT.
+security_scheme = HTTPBearer(auto_error=False)
+
+def get_current_user(creds: HTTPAuthorizationCredentials | None = Depends(security_scheme), db: Session = Depends(get_db)):
+    """FastAPI dependency: validates the Bearer token and returns the user row.
+    
+    Inject into any endpoint requiring authentication:
+        @app.post("/api/ratings")
+        def submit_rating(..., current_user = Depends(get_current_user)):
+            # current_user.id, .email, .role, .username are available
+    """
+    # Defensive parsing: remove quotes if the user accidentally pasted them from JSON
+    token = creds.credentials.strip('"\'') if creds else None
+    
+    if not token:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Not authenticated. Please log in.",
+                            headers={"WWW-Authenticate": "Bearer"})
+    payload = decode_access_token(token)
+    if not payload:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid or expired token. Please log in again.",
+                            headers={"WWW-Authenticate": "Bearer"})
+    user = db.execute(
+        text("SELECT id, email, username, role, is_active, totp_enabled FROM users WHERE id = :uid"),
+        {"uid": int(payload["sub"])}
+    ).fetchone()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Account not found or has been deactivated.")
+    return user
+
 @app.get("/api/users/{user_id}/favorites")
-def get_user_favorites(user_id: int = Path(..., gt=0), db: Session = Depends(get_db)): 
-    """Fetch the user's top-rated movies directly via PostgreSQL JOIN."""
+def get_user_favorites(user_id: int = Path(..., gt=0), db: Session = Depends(get_db), current_user=Depends(get_current_user)): 
+    """Fetch a user's top-rated movies (4 stars and above).
+    
+    Any authenticated user can view any other user's favorites — this powers
+    the social discovery feature (e.g. see what a friend is loving).
+    """
     query = text("""
         SELECT m.movie_id, m.title, m.genres, m.tmdb_id, r.rating
         FROM movies m
@@ -100,14 +153,89 @@ def get_user_favorites(user_id: int = Path(..., gt=0), db: Session = Depends(get
         
     return results
 
+
+@app.get("/api/users/me/ratings")
+def get_my_ratings(
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Get all ratings submitted by the currently logged-in user."""
+    rows = db.execute(
+        text("""
+            SELECT m.movie_id, m.title, m.genres, m.tmdb_id, r.rating,
+                   to_timestamp(r.timestamp) AS rated_at
+            FROM ratings r
+            JOIN movies m ON m.movie_id = r.movie_id
+            WHERE r.user_id = :uid
+            ORDER BY r.timestamp DESC
+            LIMIT :limit
+        """),
+        {"uid": current_user.id, "limit": limit}
+    ).fetchall()
+    return {
+        "user_id": current_user.id,
+        "total": len(rows),
+        "ratings": [
+            {
+                "movie_id": r.movie_id,
+                "title":    r.title,
+                "genres":   r.genres.split('|') if r.genres else [],
+                "tmdb_id":  r.tmdb_id,
+                "rating":   float(r.rating),
+                "rated_at": str(r.rated_at) if r.rated_at else None,
+            } for r in rows
+        ]
+    }
+
+
+@app.get("/api/users/{user_id}/ratings")
+def get_user_ratings(
+    user_id: int = Path(..., gt=0),
+    limit: int = Query(50, ge=1, le=500),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Get all ratings submitted by a specific user (social discovery).
+    
+    Any authenticated user can view another user's ratings history.
+    """
+    rows = db.execute(
+        text("""
+            SELECT m.movie_id, m.title, m.genres, m.tmdb_id, r.rating,
+                   to_timestamp(r.timestamp) AS rated_at
+            FROM ratings r
+            JOIN movies m ON m.movie_id = r.movie_id
+            WHERE r.user_id = :uid
+            ORDER BY r.timestamp DESC
+            LIMIT :limit
+        """),
+        {"uid": user_id, "limit": limit}
+    ).fetchall()
+    return {
+        "user_id": user_id,
+        "total": len(rows),
+        "ratings": [
+            {
+                "movie_id": r.movie_id,
+                "title":    r.title,
+                "genres":   r.genres.split('|') if r.genres else [],
+                "tmdb_id":  r.tmdb_id,
+                "rating":   float(r.rating),
+                "rated_at": str(r.rated_at) if r.rated_at else None,
+            } for r in rows
+        ]
+    }
+
 @app.get("/api/recommendations/top-picks")
 def get_top_picks(
-    user_id: int = Query(..., gt=0), 
     limit: int = Query(10, ge=1, le=50), 
     alpha: float = Query(0.7, ge=0.0, le=1.0),
-    db: Session = Depends(get_db)
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
 ):
     """The main 'For You' row integrating pgvector Candidate Generation with the Python SVD model."""
+    user_id = current_user.id
     svd = ml_artifacts.get("svd_model")
     if not svd:
         raise HTTPException(status_code=503, detail="Service temporarily unavailable.")
@@ -552,21 +680,147 @@ def get_trending(
     category: str = None,
     db: Session = Depends(get_db)
 ):
-    """Trending movies calculated via blazing fast SQL Data Warehousing queries."""
+    """Trending movies calculated via blazing fast SQL Data Warehousing queries.
     
-    # We combine COUNT(ratings) [popularity] and AVG(ratings) [quality] into a trending score
+    The `category` parameter accepts both real genre names (e.g. 'Comedy') and
+    colloquial aliases (e.g. 'romcom', 'sci-fi', 'chick flick') which are
+    expanded to their canonical MovieLens genre equivalents before the SQL runs.
+    """
+    
+    # ── Genre alias / slang expansion ────────────────────────────────────────
+    # For aliases that map cleanly to MovieLens genres, we filter by genre.
+    # MovieLens has 19 genres: Action, Adventure, Animation, Children, Comedy,
+    # Crime, Documentary, Drama, Fantasy, Film-Noir, Horror, IMAX, Musical,
+    # Mystery, Romance, Sci-Fi, Thriller, War, Western.
+    MOOD_MAP: dict[str, list[str]] = {
+        "romcom":      ["Romance", "Comedy"],
+        "rom-com":     ["Romance", "Comedy"],
+        "rom com":     ["Romance", "Comedy"],
+        "romantic comedy": ["Romance", "Comedy"],
+        "chick flick": ["Romance", "Comedy"],
+        "scary":       ["Horror"],
+        "spooky":      ["Horror", "Thriller"],
+        "sci fi":      ["Sci-Fi"],
+        "sci-fi":      ["Sci-Fi"],
+        "scifi":       ["Sci-Fi"],
+        "space":       ["Sci-Fi"],
+        "cartoon":     ["Animation", "Children"],
+        "kids":        ["Children", "Animation"],
+        "family":      ["Children", "Animation", "Comedy"],
+        "whodunit":    ["Mystery", "Crime"],
+        "suspense":    ["Thriller", "Mystery"],
+        "war film":    ["War"],
+        "war movie":   ["War"],
+        "western":     ["Western"],
+        "cowboy":      ["Western"],
+        "documentary": ["Documentary"],
+        "doc":         ["Documentary"],
+        "true story":  ["Documentary", "Drama"],
+        "musical":     ["Musical"],
+        "feel good":   ["Comedy", "Romance"],
+        "tearjerker":  ["Drama", "Romance"],
+        "magic":       ["Fantasy"],
+        "historical":  ["Drama", "War"],
+        "love story":  ["Romance", "Drama"],
+        "funny":       ["Comedy"],
+        "laugh":       ["Comedy"],
+        "hilarious":   ["Comedy"],
+        "romantic":    ["Romance"],
+        "crime":       ["Crime", "Thriller"],
+        "noir":        ["Film-Noir", "Crime"],
+        "gritty":      ["Crime", "Thriller"],
+        "dark":        ["Crime", "Thriller", "Film-Noir"],
+    }
+
+    # ── Title keyword map ─────────────────────────────────────────────────────
+    # For aliases that DON'T map cleanly to MovieLens genres, we search by
+    # well-known movie titles instead. This is necessary because MovieLens has
+    # no "Superhero", "Anime", or "Martial Arts" genre tag.
+    TITLE_KEYWORDS_MAP: dict[str, list[str]] = {
+        "superhero": [
+            "spider-man", "batman", "superman", "avengers", "x-men",
+            "iron man", "hulk", "thor", "captain america", "deadpool",
+            "black panther", "aquaman", "wonder woman", "justice league",
+            "guardians of the galaxy", "ant-man", "dr. strange", "fantastic four",
+        ],
+        "anime": [
+            "spirited away", "princess mononoke", "akira", "ghost in the shell",
+            "howl's moving castle", "my neighbor totoro", "nausicaa",
+            "grave of the fireflies", "perfect blue", "paprika",
+            "ninja scroll", "cowboy bebop", "dragon ball", "evangelion",
+            "castle in the sky", "kiki's delivery service",
+        ],
+        "kung fu": [
+            "kung fu", "martial arts", "shaolin", "bruce lee", "jackie chan",
+            "jet li", "enter the dragon", "drunken master", "crouching tiger",
+            "fist of fury", "way of the dragon", "ip man", "hero", "house of flying",
+        ],
+    }
+
+    DIRECT_GENRES = [
+        "Action", "Adventure", "Animation", "Children", "Comedy", "Crime",
+        "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "IMAX",
+        "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"
+    ]
+
+    # Resolve the category string into canonical genre(s) or title keywords
+    resolved_genres: list[str] = []
+    resolved_title_keywords: list[str] = []
+    row_title = "Trending Now"
+    
+    if category:
+        cat_lower = category.strip().lower()
+
+        # 1. Check title keyword map FIRST (highest precision)
+        for keyword, titles in TITLE_KEYWORDS_MAP.items():
+            if keyword in cat_lower:
+                resolved_title_keywords = titles
+                row_title = f"Trending in {category.title()}"
+                break  # title keyword wins, skip genre resolution
+
+        if not resolved_title_keywords:
+            # 2. Check genre slang map
+            for keyword, genres in MOOD_MAP.items():
+                if keyword in cat_lower:
+                    for g in genres:
+                        if g not in resolved_genres:
+                            resolved_genres.append(g)
+            # 3. Check if a real genre name was typed directly (e.g. "comedy")
+            for genre in DIRECT_GENRES:
+                if genre.lower() in cat_lower and genre not in resolved_genres:
+                    resolved_genres.append(genre)
+            # 4. If nothing matched at all, use the raw string as a fallback ILIKE on genres
+            if not resolved_genres:
+                resolved_genres = [category]
+            row_title = f"Trending in {category.title()}"
+
+    # ── Build SQL ─────────────────────────────────────────────────────────────
     sql_query = """
         SELECT m.movie_id, m.title, m.genres, m.tmdb_id,
                COUNT(r.rating) * AVG(r.rating) AS trending_score
         FROM movies m
         JOIN ratings r ON m.movie_id = r.movie_id
     """
-    params = {"limit": limit}
-    
-    if category:
-        # SQL Injection safe because we use SQLAlchemy parameter binding `:cat`
-        sql_query += " WHERE m.genres ILIKE :cat"
-        params["cat"] = f"%{category}%"
+    params: dict = {"limit": limit}
+
+    if resolved_title_keywords:
+        # Title keyword mode: movie title must contain at least one keyword
+        title_conditions = " OR ".join(
+            f"LOWER(m.title) ILIKE :tk_{i}" for i in range(len(resolved_title_keywords))
+        )
+        sql_query += f" WHERE ({title_conditions})"
+        for i, kw in enumerate(resolved_title_keywords):
+            params[f"tk_{i}"] = f"%{kw}%"
+
+    elif resolved_genres:
+        # Genre mode: movie must have ALL resolved genres (AND semantics)
+        # "romcom" → WHERE genres ILIKE '%Romance%' AND genres ILIKE '%Comedy%'
+        genre_conditions = " AND ".join(
+            f"m.genres ILIKE :genre_{i}" for i in range(len(resolved_genres))
+        )
+        sql_query += f" WHERE ({genre_conditions})"
+        for i, genre in enumerate(resolved_genres):
+            params[f"genre_{i}"] = f"%{genre}%"
         
     sql_query += """
         GROUP BY m.movie_id, m.title, m.genres, m.tmdb_id
@@ -586,8 +840,8 @@ def get_trending(
             "trending_score": round(float(row.trending_score), 2)
         })
         
-    row_title = f"Trending in {category.capitalize()}" if category else "Trending Now"
     return {"row_title": row_title, "movies": results}
+
 
 
 # ==========================================================
@@ -605,12 +859,10 @@ class RatingSubmission(BaseModel):
       matching the MovieLens dataset convention. Any non-standard value
       (e.g. 3.3, 7.0, -1) is rejected at the Pydantic layer before any
       SQL is even attempted — we never trust raw client input.
-    - user_id and movie_id are constrained to gt=0 so negative IDs cannot
-      be used to probe the database.
+    - movie_id is constrained to gt=0 so negative IDs cannot be used to probe the database.
     - timestamp is optional; when omitted we use PostgreSQL's NOW() on the
       server side, preventing clients from forging historical timestamps.
     """
-    user_id: int = Field(..., gt=0, description="ID of the user submitting the rating")
     movie_id: int = Field(..., gt=0, description="ID of the movie being rated")
     rating: float = Field(..., ge=0.5, le=5.0, description="Star rating from 0.5 to 5.0 in 0.5 increments")
     timestamp: int | None = Field(None, description="Unix timestamp (optional — server uses NOW() if omitted)")
@@ -625,7 +877,7 @@ class RatingSubmission(BaseModel):
 
 
 @app.post("/api/ratings", status_code=status.HTTP_201_CREATED)
-def submit_rating(payload: RatingSubmission, db: Session = Depends(get_db)):
+def submit_rating(payload: RatingSubmission, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Submit or update a movie rating for a user.
     
     This is the write endpoint that feeds new explicit feedback back into
@@ -633,9 +885,8 @@ def submit_rating(payload: RatingSubmission, db: Session = Depends(get_db)):
     recommendation models (SVD, KNN, NMF) and trending calculations.
     
     Behaviour:
-    - Returns 404 if user_id or movie_id do not exist in the database.
-      This prevents ghost ratings (data noise for orphaned IDs) and also
-      prevents ID enumeration attacks from discovering valid ID ranges.
+    - Returns 404 if movie_id does not exist in the database.
+      This prevents ghost ratings (data noise for orphaned IDs).
     - Uses INSERT ... ON CONFLICT DO UPDATE (upsert) so re-rating a movie
       updates the existing row rather than creating a duplicate. This keeps
       the ratings table clean and the model training deterministic.
@@ -643,21 +894,7 @@ def submit_rating(payload: RatingSubmission, db: Session = Depends(get_db)):
       provide one, preventing clients from forging historical timestamps.
     """
 
-    # ── Guard 1: Verify the user exists ──────────────────────────────────
-    # We check the ratings table (not a users table) since our dataset does
-    # not have a standalone users table — any user_id that has rated at
-    # least one movie in the past is a valid, known user.
-    user_exists = db.execute(
-        text("SELECT 1 FROM ratings WHERE user_id = :uid LIMIT 1"),
-        {"uid": payload.user_id}
-    ).fetchone()
-    if not user_exists:
-        raise HTTPException(
-            status_code=status.HTTP_404_NOT_FOUND,
-            detail=f"User {payload.user_id} not found."
-        )
-
-    # ── Guard 2: Verify the movie exists ─────────────────────────────────
+    # ── Guard: Verify the movie exists ─────────────────────────────────
     movie_row = db.execute(
         text("SELECT title FROM movies WHERE movie_id = :mid"),
         {"mid": payload.movie_id}
@@ -672,61 +909,90 @@ def submit_rating(payload: RatingSubmission, db: Session = Depends(get_db)):
     # ON CONFLICT (user_id, movie_id) DO UPDATE means:
     #   - First rating  → INSERT a fresh row.
     #   - Re-rating     → UPDATE rating + timestamp in place, no duplicates.
-    # The (user_id, movie_id) pair must be a UNIQUE constraint in Postgres
-    # for this to work. If not yet present, the fallback is a safe no-op.
+    # The (user_id, movie_id) pair must be a UNIQUE constraint in Postgres.
+    # If it doesn't exist (e.g. fresh DB), we fall back to a plain INSERT.
     upsert_query = text("""
         INSERT INTO ratings (user_id, movie_id, rating, timestamp)
         VALUES (
             :uid,
             :mid,
             :rating,
-            COALESCE(:ts, EXTRACT(EPOCH FROM NOW())::BIGINT)
+            COALESCE(CAST(:ts AS BIGINT), EXTRACT(EPOCH FROM NOW())::BIGINT)
         )
         ON CONFLICT (user_id, movie_id)
         DO UPDATE SET
             rating    = EXCLUDED.rating,
             timestamp = EXCLUDED.timestamp
     """)
-    db.execute(upsert_query, {
-        "uid":    payload.user_id,
-        "mid":    payload.movie_id,
-        "rating": payload.rating,
-        "ts":     payload.timestamp,
-    })
-    db.commit()
+    try:
+        db.execute(upsert_query, {
+            "uid":    current_user.id,
+            "mid":    payload.movie_id,
+            "rating": payload.rating,
+            "ts":     payload.timestamp,
+        })
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        # Most likely cause: UNIQUE constraint missing on (user_id, movie_id).
+        # Tell the developer exactly how to fix it instead of a generic 500.
+        if "unique constraint" in str(exc).lower() or "duplicate key" in str(exc).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail="Duplicate rating detected but UNIQUE constraint is missing on the ratings table. "
+                       "Run: python src/add_ratings_constraint.py to fix this."
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error while saving rating: {str(exc)}"
+        )
 
     # ── Respond with a structured confirmation ────────────────────────────
-    action = "updated" if payload.rating else "saved"
     return {
         "status": "success",
-        "message": f"Rating {action} for retraining.",
-        "user_id": payload.user_id,
+        "message": "Rating updated for retraining.",
+        "user_id": current_user.id,
         "movie_id": payload.movie_id,
         "movie_title": movie_row.title,
         "rating": payload.rating,
     }
 
 
+@app.delete("/api/ratings/{movie_id}", status_code=200)
+def delete_rating(
+    movie_id: int = Path(..., gt=0),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Remove a user's rating for a specific movie.
+    
+    This is the complement to POST /api/ratings. Use this when the user
+    wants to wipe their opinion (rather than re-rate with a new star count).
+    The rating row is permanently deleted from the ratings table.
+    """
+    result = db.execute(
+        text("DELETE FROM ratings WHERE user_id = :uid AND movie_id = :mid"),
+        {"uid": current_user.id, "mid": movie_id}
+    )
+    db.commit()
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"No rating found for movie {movie_id} to delete."
+        )
+    return {"status": "success", "message": f"Rating for movie {movie_id} has been deleted."}
+
 # ==========================================================
 # 8. PHASE A5 — USER PROFILE ENDPOINT
 # ==========================================================
 
 @app.get("/api/users/{user_id}/profile")
-def get_user_profile(user_id: int = Path(..., gt=0), db: Session = Depends(get_db)):
+def get_user_profile(user_id: int = Path(..., gt=0), db: Session = Depends(get_db), current_user=Depends(get_current_user)):
     """Return a user's taste profile: rating stats, top genres, and favourites.
 
+    Any authenticated user can view any profile (social discovery).
     Matches the implementation plan contract:
       { user_id, total_ratings, average_rating, top_genres, favorites }
-
-    Design decisions:
-    - A single SQL aggregation query computes total_ratings and average_rating
-      directly in Postgres — far faster than pulling all rows into Python.
-    - Genre frequencies are computed in Python from the favourites list because
-      genres are stored as pipe-delimited strings (e.g. "Action|Sci-Fi"). A
-      pure-SQL approach would require string_to_array() and unnest(), which adds
-      complexity; the Python loop is simpler and the dataset is small enough.
-    - A user is identified by having at least one rating row. If none exist,
-      we return 404 rather than an empty profile, consistent with Task 1.
     """
 
     # ── Step 1: Aggregate stats directly in Postgres ──────────────────────
@@ -857,21 +1123,8 @@ def trigger_retrain(x_admin_secret: str | None = Header(default=None)):
     Poll GET /api/retrain/status to check when the new model is live.
 
     Security: Requires the X-Admin-Secret request header to match the
-    ADMIN_SECRET environment variable. This is a lightweight interim guard
-    until Phase A6 JWT authentication is implemented. Never hardcode secrets.
-
-    This completes the full feedback loop:
-      User rates a movie (POST /api/ratings)
-        → Rating written to Postgres
-          → Retrain triggered (POST /api/retrain)
-            → SVD trained on updated data in background
-              → Fresh model hot-swapped into API memory
-                → Next top-picks request reflects the new rating  ✅
+    ADMIN_SECRET environment variable.
     """
-    # ── Admin secret key guard ───────────────────────────────────────────
-    # Read the expected secret from the .env file on the server.
-    # FastAPI injects X-Admin-Secret from the request header automatically
-    # via the Header() dependency above (header name is lowercased + underscored).
     expected_secret = os.getenv("ADMIN_SECRET")
     if not expected_secret:
         raise HTTPException(
@@ -904,3 +1157,442 @@ def trigger_retrain(x_admin_secret: str | None = Header(default=None)):
 def get_retrain_status():
     """Poll this endpoint to check if background retraining is still running."""
     return retrain_status
+
+
+# ==========================================================
+# 10. PHASE A6 — JWT AUTHENTICATION
+# ==========================================================
+
+FRONTEND_URL = os.getenv("FRONTEND_URL", "http://localhost:3000")
+
+
+# ── Pydantic Models ────────────────────────────────────────────────────────────
+
+class RegisterRequest(BaseModel):
+    username: str = Field(..., min_length=3, max_length=50)
+    email:    EmailStr
+    password: str = Field(..., min_length=8)
+
+    @field_validator("username")
+    @classmethod
+    def username_alphanumeric(cls, v: str) -> str:
+        if not re.match(r"^[a-zA-Z0-9_]+$", v):
+            raise ValueError("Username may only contain letters, numbers, and underscores.")
+        return v.strip()
+
+    @field_validator("password")
+    @classmethod
+    def password_strong_enough(cls, v: str) -> str:
+        issues = validate_password_strength(v)
+        if issues:
+            raise ValueError(" ".join(issues))
+        return v
+
+
+class LoginRequest(BaseModel):
+    email:    EmailStr
+    password: str
+    totp_code: str | None = Field(None, description="6-digit TOTP code (only if 2FA is enabled)")
+
+
+class RefreshRequest(BaseModel):
+    refresh_token: str
+
+
+class ForgotPasswordRequest(BaseModel):
+    email: EmailStr
+
+
+class ResetPasswordRequest(BaseModel):
+    token:        str
+    new_password: str = Field(..., min_length=8)
+
+    @field_validator("new_password")
+    @classmethod
+    def password_strong_enough(cls, v: str) -> str:
+        issues = validate_password_strength(v)
+        if issues:
+            raise ValueError(" ".join(issues))
+        return v
+
+
+class Enable2FARequest(BaseModel):
+    totp_code: str = Field(..., description="6-digit code sent to your email")
+
+class DeactivateRequest(BaseModel):
+    password: str = Field(..., description="Your current password to confirm account deactivation")
+
+
+
+
+
+# ── POST /auth/register ────────────────────────────────────────────────────────
+
+@app.post("/auth/register", status_code=status.HTTP_201_CREATED,
+          summary="Register a new Flicker account")
+async def register(payload: RegisterRequest, db: Session = Depends(get_db)):
+    """Create a new user account.
+    
+    Security:
+    - Password is hashed with bcrypt before storage. Plain text is never persisted.
+    - Duplicate email check uses a single indexed query (idx_users_email).
+    - Returns both tokens so the user is immediately logged in after signup.
+    """
+    # Duplicate email guard (case-insensitive)
+    existing = db.execute(
+        text("SELECT id FROM users WHERE LOWER(email) = LOWER(:email)"),
+        {"email": payload.email}
+    ).fetchone()
+    if existing:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="An account with this email already exists.")
+
+    # Duplicate username guard
+    existing_username = db.execute(
+        text("SELECT id FROM users WHERE LOWER(username) = LOWER(:username)"),
+        {"username": payload.username}
+    ).fetchone()
+    if existing_username:
+        raise HTTPException(status_code=status.HTTP_409_CONFLICT,
+                            detail="This username is already taken.")
+
+    # Hash password and insert new user
+    hashed = hash_password(payload.password)
+    new_user = db.execute(
+        text("""
+            INSERT INTO users (email, username, hashed_password, role)
+            VALUES (:email, :username, :hashed, 'user')
+            RETURNING id, email, username, role
+        """),
+        {"email": payload.email, "username": payload.username, "hashed": hashed}
+    ).fetchone()
+    db.commit()
+
+    # Send welcome email in background (don't block the response)
+    try:
+        await send_welcome_email(new_user.email, new_user.username)
+    except Exception:
+        pass  # Email failure should never break registration
+
+    access_token  = create_access_token(new_user.id, new_user.email, new_user.role)
+    refresh_token = create_refresh_token(new_user.id)
+
+    return {
+        "message":       "Account created successfully! Welcome to Flicker.",
+        "access_token":  access_token,
+        "refresh_token": refresh_token,
+        "token_type":    "bearer",
+        "user": {
+            "id":       new_user.id,
+            "email":    new_user.email,
+            "username": new_user.username,
+            "role":     new_user.role,
+        }
+    }
+
+
+# ── POST /auth/login ───────────────────────────────────────────────────────────
+
+@app.post("/auth/login", summary="Log in and receive tokens")
+def login(payload: LoginRequest, background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Authenticate with email + password (and optional 2FA code).
+
+    Security:
+    - Always says 'Invalid email or password' regardless of which field is wrong.
+    - 2FA only enforced if the user has explicitly enabled it.
+    """
+    # ── Fetch user from DB ───────────────────────────────────────────────────
+    try:
+        user = db.execute(
+            text("SELECT id, email, username, hashed_password, role, is_active, totp_enabled, totp_secret FROM users WHERE LOWER(email) = LOWER(:email)"),
+            {"email": payload.email}
+        ).fetchone()
+    except Exception as exc:
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error during login: {str(exc)}"
+        )
+
+    # Deliberately vague — never reveal which of email/password is wrong
+    auth_error = HTTPException(
+        status_code=status.HTTP_401_UNAUTHORIZED,
+        detail="Invalid email or password."
+    )
+
+    if not user:
+        raise auth_error
+    if not verify_password(payload.password, user.hashed_password):
+        raise auth_error
+
+    # 2FA Email OTP Flow
+    if bool(user.totp_enabled):
+        if not payload.totp_code:
+            # Generate a 6-digit code and save it to the DB
+            new_code = "".join(secrets.choice("0123456789") for _ in range(6))
+            db.execute(
+                text("UPDATE users SET totp_secret = :code WHERE id = :uid"),
+                {"code": new_code, "uid": user.id}
+            )
+            db.commit()
+            
+            # IMPORTANT: BackgroundTasks are dropped when HTTPException is raised.
+            # We must send the email BEFORE raising, using a fire-and-forget thread
+            # so we don't block the response.
+            threading.Thread(
+                target=lambda: __import__('asyncio').run(send_2fa_code_email(user.email, new_code)),
+                daemon=True
+            ).start()
+            
+            raise HTTPException(
+                status_code=status.HTTP_202_ACCEPTED,
+                detail="2FA_REQUIRED"
+            )
+            
+        # Verify the provided code
+        if payload.totp_code != user.totp_secret:
+            raise HTTPException(
+                status_code=status.HTTP_401_UNAUTHORIZED,
+                detail="Invalid 2FA code. Please try again or request a new one."
+            )
+            
+        # Clear the code after successful use to prevent replay attacks
+        db.execute(text("UPDATE users SET totp_secret = NULL WHERE id = :uid"), {"uid": user.id})
+        db.commit()
+
+    # Auto-reactivation: If the user soft-deleted their account, logging in restores it
+    if not user.is_active:
+        db.execute(text("UPDATE users SET is_active = TRUE WHERE id = :uid"), {"uid": user.id})
+        db.commit()
+
+    access_token  = create_access_token(user.id, user.email, user.role)
+    refresh_token = create_refresh_token(user.id)
+
+    return {
+        "access_token":  access_token,
+        "refresh_token": refresh_token,
+        "token_type":    "bearer",
+        "user": {
+            "id":           user.id,
+            "email":        user.email,
+            "username":     user.username,
+            "role":         user.role,
+            "totp_enabled": bool(user.totp_enabled),
+        }
+    }
+
+
+
+# ── POST /auth/refresh ─────────────────────────────────────────────────────────
+
+@app.post("/auth/refresh", summary="Silently renew tokens (keeps user logged in)")
+def refresh_tokens(payload: RefreshRequest, db: Session = Depends(get_db)):
+    """Exchange a valid refresh token for a new access + refresh token pair.
+    
+    The frontend calls this automatically when the access token expires.
+    The user never sees a login prompt — the session feels permanent.
+    
+    30-day refresh tokens mean users stay logged in for a month without
+    doing anything. After 30 days of inactivity they are asked to log in once.
+    """
+    token_data = decode_refresh_token(payload.refresh_token)
+    if not token_data:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Invalid or expired refresh token. Please log in again.")
+
+    user = db.execute(
+        text("SELECT id, email, username, role, is_active FROM users WHERE id = :uid"),
+        {"uid": int(token_data["sub"])}
+    ).fetchone()
+    if not user or not user.is_active:
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED,
+                            detail="Account not found or has been deactivated.")
+
+    # Issue fresh token pair (rotating refresh tokens for security)
+    new_access  = create_access_token(user.id, user.email, user.role)
+    new_refresh = create_refresh_token(user.id)
+
+    return {
+        "access_token":  new_access,
+        "refresh_token": new_refresh,
+        "token_type":    "bearer",
+    }
+
+
+# ── POST /auth/forgot-password ─────────────────────────────────────────────────
+
+@app.post("/auth/forgot-password", summary="Request a password reset email")
+async def forgot_password(payload: ForgotPasswordRequest, db: Session = Depends(get_db)):
+    """Send a password reset link to the user's email.
+    
+    Security: ALWAYS returns the same response whether the email exists or not.
+    This prevents user enumeration (attacker cannot discover valid emails).
+    The reset link expires in 15 minutes.
+    """
+    # Look up the user but don't reveal whether found or not in the response
+    user = db.execute(
+        text("SELECT id, email FROM users WHERE LOWER(email) = LOWER(:email)"),
+        {"email": payload.email}
+    ).fetchone()
+
+    if user:
+        reset_token = create_password_reset_token(user.id, user.email)
+        reset_link  = f"{FRONTEND_URL}/reset-password?token={reset_token}"
+        try:
+            await send_password_reset_email(user.email, reset_link)
+        except Exception:
+            pass  # Never reveal email sending failure to the client
+
+    # Always return the same message (enumeration prevention)
+    return {
+        "message": "If an account with that email exists, you will receive a password reset link shortly."
+    }
+
+
+# ── POST /auth/reset-password ──────────────────────────────────────────────────
+
+@app.post("/auth/reset-password", summary="Set a new password using reset token")
+def reset_password(payload: ResetPasswordRequest, db: Session = Depends(get_db)):
+    """Validate the reset token from the email link and update the password."""
+    token_data = decode_reset_token(payload.token)
+    if not token_data:
+        raise HTTPException(status_code=status.HTTP_400_BAD_REQUEST,
+                            detail="This password reset link is invalid or has expired. Please request a new one.")
+
+    new_hash = hash_password(payload.new_password)
+    result = db.execute(
+        text("UPDATE users SET hashed_password = :hashed WHERE id = :uid"),
+        {"hashed": new_hash, "uid": int(token_data["sub"])}
+    )
+    db.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(status_code=status.HTTP_404_NOT_FOUND,
+                            detail="Account not found.")
+
+    return {"message": "Password updated successfully. You can now log in with your new password."}
+
+
+# ── GET /auth/me ───────────────────────────────────────────────────────────────
+
+@app.get("/auth/me", summary="Get current logged-in user info")
+def get_me(current_user=Depends(get_current_user)):
+    """Return the profile of the currently authenticated user."""
+    return {
+        "id":           current_user.id,
+        "email":        current_user.email,
+        "username":     current_user.username,
+        "role":         current_user.role,
+        "totp_enabled": current_user.totp_enabled,
+    }
+
+
+# ── POST /auth/me/deactivate ───────────────────────────────────────────────────
+
+@app.post("/auth/me/deactivate", summary="Deactivate (soft-delete) your account")
+def deactivate_account(
+    payload: DeactivateRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Soft-delete the account by setting is_active=FALSE.
+    
+    Requires the user's password for security to prevent unauthorized deactivation.
+    The account is NOT deleted from the database. Users can reactivate by logging in
+    via the /auth/login endpoint.
+    """
+    # Fetch hashed password
+    row = db.execute(
+        text("SELECT hashed_password FROM users WHERE id = :uid"),
+        {"uid": current_user.id}
+    ).fetchone()
+
+    if not verify_password(payload.password, row.hashed_password):
+        raise HTTPException(status_code=status.HTTP_401_UNAUTHORIZED, detail="Invalid password.")
+
+    db.execute(
+        text("UPDATE users SET is_active = FALSE WHERE id = :uid"),
+        {"uid": current_user.id}
+    )
+    db.commit()
+    return {"message": "Your account has been deactivated. You can restore it anytime by logging into /auth/reactivate."}
+
+
+
+# ── POST /auth/2FA/setup ───────────────────────────────────────────────────────
+
+@app.post("/auth/2fa/setup", summary="Initiate 2FA setup — sends code to email")
+def setup_2fa(background_tasks: BackgroundTasks, db: Session = Depends(get_db), current_user=Depends(get_current_user)):
+    """Step 1 of 2FA setup: generate a 6-digit OTP code and email it.
+    
+    2FA is NOT enabled yet — the user must confirm they received the code
+    by passing it to POST /auth/2fa/verify.
+    """
+    code = "".join(secrets.choice("0123456789") for _ in range(6))
+
+    # Store the pending secret (not active until verified)
+    db.execute(
+        text("UPDATE users SET totp_secret = :code WHERE id = :uid"),
+        {"code": code, "uid": current_user.id}
+    )
+    db.commit()
+    
+    background_tasks.add_task(send_2fa_code_email, current_user.email, code)
+
+    return {"message": "A 6-digit verification code has been sent to your email. Call POST /auth/2fa/verify to complete setup."}
+
+
+# ── POST /auth/2fa/verify ──────────────────────────────────────────────────────
+
+@app.post("/auth/2fa/verify", summary="Confirm 2FA setup by verifying the email code")
+def verify_2fa_setup(
+    payload: Enable2FARequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Step 2 of 2FA setup: verify the emailed code to officially activate 2FA."""
+    row = db.execute(
+        text("SELECT totp_secret FROM users WHERE id = :uid"),
+        {"uid": current_user.id}
+    ).fetchone()
+
+    if not row or not row.totp_secret:
+        raise HTTPException(status_code=400,
+                            detail="No 2FA setup in progress. Call POST /auth/2fa/setup first.")
+
+    if payload.totp_code != row.totp_secret:
+        raise HTTPException(status_code=400,
+                            detail="Invalid code. Please check your email and try again.")
+
+    # Activate 2FA and clear out the used code
+    db.execute(
+        text("UPDATE users SET totp_enabled = TRUE, totp_secret = NULL WHERE id = :uid"),
+        {"uid": current_user.id}
+    )
+    db.commit()
+
+    return {"message": "2FA has been successfully enabled on your account! Your logins will now require an email verification code. ✅"}
+
+
+# ── POST /auth/2fa/disable ─────────────────────────────────────────────────────
+
+@app.post("/auth/2fa/disable", summary="Disable 2FA")
+def disable_2fa(
+    payload: DeactivateRequest,  # We reuse the password payload for security check
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Disable 2FA. Requires password to prevent unauthorized disabling."""
+    row = db.execute(
+        text("SELECT hashed_password FROM users WHERE id = :uid"),
+        {"uid": current_user.id}
+    ).fetchone()
+
+    if not verify_password(payload.password, row.hashed_password):
+        raise HTTPException(status_code=401, detail="Invalid password.")
+
+    db.execute(
+        text("UPDATE users SET totp_enabled = FALSE, totp_secret = NULL WHERE id = :uid"),
+        {"uid": current_user.id}
+    )
+    db.commit()
+    return {"message": "2FA has been successfully disabled."}
