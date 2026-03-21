@@ -1,0 +1,80 @@
+@import url('https://fonts.googleapis.com/css2?family=Bebas+Neue&family=Inter:wght@300;400;500;600;700;800&display=swap');
+@import "tailwindcss";
+
+/* Tell Tailwind v4 to scan all source files for class names */
+@source "../components/**/*.{tsx,ts,jsx,js}";
+@source "../app/**/*.{tsx,ts,jsx,js}";
+@source "../lib/**/*.{tsx,ts,jsx,js}";
+
+
+:root {
+  --color-bg: #0A0A0A;
+  --color-surface: #141414;
+  --color-card: #1C1C1C;
+  --color-red: #E50914;
+  --color-red-hover: #FF1A1A;
+  --color-border: #2A2A2A;
+  --color-text: #FFFFFF;
+  --color-muted: #A3A3A3;
+  --font-display: 'Bebas Neue', sans-serif;
+  --font-body: 'Inter', sans-serif;
+}
+
+* {
+  margin: 0;
+  padding: 0;
+  box-sizing: border-box;
+}
+
+html,
+body {
+  background-color: var(--color-bg);
+  color: var(--color-text);
+  font-family: var(--font-body);
+  scroll-behavior: smooth;
+  overflow-x: hidden;
+}
+
+/* Hide scrollbar but keep scroll */
+.scrollbar-hide {
+  scrollbar-width: none;
+  -ms-overflow-style: none;
+}
+
+.scrollbar-hide::-webkit-scrollbar {
+  display: none;
+}
+
+/* Red glow on hover */
+.card-glow:hover {
+  box-shadow: 0 0 0 2px var(--color-red), 0 0 24px 4px rgba(229, 9, 20, 0.35);
+}
+
+/* Cinematic gradient overlays */
+.hero-gradient {
+  background: linear-gradient(to right,
+      rgba(10, 10, 10, 0.98) 0%,
+      rgba(10, 10, 10, 0.85) 40%,
+      rgba(10, 10, 10, 0.3) 70%,
+      transparent 100%);
+}
+
+.hero-bottom-fade {
+  background: linear-gradient(to top, var(--color-bg) 0%, transparent 100%);
+}
+
+/* Glassmorphism card */
+.glass {
+  background: rgba(255, 255, 255, 0.05);
+  backdrop-filter: blur(12px);
+  -webkit-backdrop-filter: blur(12px);
+  border: 1px solid rgba(255, 255, 255, 0.08);
+}
+
+/* Navbar blur */
+.navbar-blur {
+  backdrop-filter: blur(16px);
+  -webkit-backdrop-filter: blur(16px);
+  background: rgba(10, 10, 10, 0.85);
+  border-bottom: 1px solid var(--color-border);
+}
