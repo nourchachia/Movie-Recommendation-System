@@ -7,7 +7,7 @@ import pickle
 import secrets
 import threading
 import numpy as np
-from fastapi import FastAPI, HTTPException, Query, Path, Depends, Header, status, BackgroundTasks
+from fastapi import FastAPI, HTTPException, Query, Path, Depends, Header, status, BackgroundTasks, Body
 from fastapi.security import HTTPBearer, HTTPAuthorizationCredentials
 from fastapi.middleware.cors import CORSMiddleware
 from contextlib import asynccontextmanager
@@ -373,26 +373,45 @@ def get_top_picks(
         genre_picks.extend(picks)
         already_used.update(p["movie_id"] for p in picks)
 
-    # -------------------------------------------------------------
     # STEP 3: SERENDIPITY (2 wildcards from OUTSIDE the user's top genres)
-    # -------------------------------------------------------------
-    # Critical: must exclude the user's top genres, otherwise a Drama fan can
-    # receive Drama movies tagged as 'broaden your horizons' — which is absurd.
-    excl_conditions = " AND ".join(
-        [f"m.genres NOT ILIKE '%{g}%'" for g in top_genres]
-    ) if top_genres else "TRUE"
-    serendipity_query = text(f"""
+    # ──────────────────────────────────────────────────────────────────────
+    # Security note: top_genres comes from the DB (movie genre strings), but
+    # we STILL whitelist them before touching SQL to eliminate any injection
+    # risk. Only strings matching the allowed genre list are passed through.
+    ALLOWED_GENRES = {
+        "Action", "Adventure", "Animation", "Children", "Comedy", "Crime",
+        "Documentary", "Drama", "Fantasy", "Film-Noir", "Horror", "IMAX",
+        "Musical", "Mystery", "Romance", "Sci-Fi", "Thriller", "War", "Western"
+    }
+    safe_top_genres = [g for g in top_genres if g in ALLOWED_GENRES]
+
+    # Build parameterized NOT ILIKE conditions — never interpolate genre values
+    # directly into the SQL string. Each genre gets its own named bind parameter.
+    if safe_top_genres:
+        excl_parts = " AND ".join(
+            f"m.genres NOT ILIKE :excl_genre_{i}" for i in range(len(safe_top_genres))
+        )
+        excl_params = {f"excl_genre_{i}": f"%{g}%" for i, g in enumerate(safe_top_genres)}
+        excl_clause = f"AND ({excl_parts})"
+    else:
+        excl_params = {}
+        excl_clause = ""
+
+    serendipity_sql = f"""
         SELECT m.movie_id, m.title, m.genres, m.tmdb_id
         FROM movies m
         JOIN ratings r ON m.movie_id = r.movie_id
         WHERE m.movie_id NOT IN (SELECT movie_id FROM ratings WHERE user_id = :uid)
-          AND {excl_conditions}
+          {excl_clause}
         GROUP BY m.movie_id, m.title, m.genres, m.tmdb_id
         HAVING AVG(r.rating) >= 4.0 AND COUNT(r.rating) > 50
         ORDER BY RANDOM()
         LIMIT 6
-    """)
-    s_movies = db.execute(serendipity_query, {"uid": user_id}).fetchall()
+    """
+    s_movies = db.execute(
+        text(serendipity_sql),
+        {"uid": user_id, **excl_params}
+    ).fetchall()
     serendipity_picks = []
     for sm in s_movies:
         if sm.movie_id not in already_used and len(serendipity_picks) < SERENDIPITY_SLOTS:
@@ -947,14 +966,29 @@ def submit_rating(payload: RatingSubmission, db: Session = Depends(get_db), curr
             detail=f"Database error while saving rating: {str(exc)}"
         )
 
+    # ── Auto-remove from watchlist ────────────────────────────────────────
+    # Design rationale: rating a movie means you watched it, so it should
+    # no longer appear on the "Want to Watch" list. We run a DELETE silently
+    # (no error if the movie wasn't in the watchlist — that's perfectly fine).
+    # This avoids any extra roundtrip from the frontend; it just happens.
+    try:
+        db.execute(
+            text("DELETE FROM watchlist WHERE user_id = :uid AND movie_id = :mid"),
+            {"uid": current_user.id, "mid": payload.movie_id}
+        )
+        db.commit()
+    except Exception:
+        pass  # Watchlist table missing or other error — never break the rating flow
+
     # ── Respond with a structured confirmation ────────────────────────────
     return {
-        "status": "success",
-        "message": "Rating updated for retraining.",
-        "user_id": current_user.id,
-        "movie_id": payload.movie_id,
-        "movie_title": movie_row.title,
-        "rating": payload.rating,
+        "status":               "success",
+        "message":              "Rating saved! Removed from watchlist if it was there. 🎬",
+        "user_id":              current_user.id,
+        "movie_id":             payload.movie_id,
+        "movie_title":          movie_row.title,
+        "rating":               payload.rating,
+        "removed_from_watchlist": True,   # frontend hint: may want to refresh watchlist
     }
 
 
@@ -981,6 +1015,234 @@ def delete_rating(
             detail=f"No rating found for movie {movie_id} to delete."
         )
     return {"status": "success", "message": f"Rating for movie {movie_id} has been deleted."}
+
+
+# ==========================================================
+# PHASE A6 TASK 2 — WATCHLIST MANAGEMENT
+# ==========================================================
+#
+# Design overview
+# ───────────────
+# The watchlist is a simple "Want to Watch" list that lives in its own
+# dedicated Postgres table. Key design decisions:
+#
+# 1. UNIQUE(user_id, movie_id) constraint at the DB level — the API returns
+#    409 Conflict if you try to add the same movie twice, with a friendly
+#    message rather than a cryptic duplicate-key error.
+#
+# 2. Optional `note` field (max 300 chars) — lets users add personal
+#    context like "watch with Sarah" or "sequel to X". PATCH lets them
+#    update it later without removing and re-adding the movie.
+#
+# 3. Auto-removal on rating — the moment a user rates a movie via
+#    POST /api/ratings, a silent DELETE is run against the watchlist.
+#    Rating = watched = no longer "want to watch". No extra UX step needed.
+#
+# 4. All 4 endpoints require authentication (get_current_user).
+#    The user_id always comes from the JWT token, never from the URL,
+#    so nobody can modify another user's watchlist.
+
+# ── Pydantic Models ────────────────────────────────────────────────────────────
+
+class WatchlistAddRequest(BaseModel):
+    movie_id: int = Field(..., gt=0, description="ID of the movie to add to your watchlist")
+    note:     str | None = Field(None, max_length=300,
+                                 description="Optional personal note, e.g. 'watch with Sarah'")
+
+class WatchlistUpdateRequest(BaseModel):
+    note: str | None = Field(None, max_length=300,
+                              description="Updated note. Set to null to clear it.")
+
+
+# ── POST /api/watchlist ────────────────────────────────────────────────────────
+
+@app.post("/api/watchlist", status_code=status.HTTP_201_CREATED,
+          summary="Add a movie to your watchlist")
+def add_to_watchlist(
+    payload: WatchlistAddRequest,
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Save a movie to your personal 'Want to Watch' list.
+
+    - Returns **201 Created** with the new watchlist entry on success.
+    - Returns **404** if the movie_id doesn't exist in our database.
+    - Returns **409 Conflict** if the movie is already in your watchlist
+      (so the frontend never needs to check first — just call this and
+      inspect the response code).
+
+    The movie is automatically removed from this list the moment you
+    rate it via POST /api/ratings.
+    """
+    # Verify the movie actually exists before adding it
+    movie_row = db.execute(
+        text("SELECT movie_id, title, genres, tmdb_id FROM movies WHERE movie_id = :mid"),
+        {"mid": payload.movie_id}
+    ).fetchone()
+    if not movie_row:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Movie {payload.movie_id} not found in the database."
+        )
+
+    # Insert the watchlist row. The UNIQUE(user_id, movie_id) constraint on the
+    # table ensures we never silently store a duplicate — we catch the DB error
+    # and return a clean 409 instead.
+    try:
+        row = db.execute(
+            text("""
+                INSERT INTO watchlist (user_id, movie_id, note)
+                VALUES (:uid, :mid, :note)
+                RETURNING id, added_at
+            """),
+            {"uid": current_user.id, "mid": payload.movie_id, "note": payload.note}
+        ).fetchone()
+        db.commit()
+    except Exception as exc:
+        db.rollback()
+        if "unique" in str(exc).lower() or "duplicate" in str(exc).lower():
+            raise HTTPException(
+                status_code=status.HTTP_409_CONFLICT,
+                detail=f"'{movie_row.title}' is already in your watchlist."
+            )
+        raise HTTPException(
+            status_code=status.HTTP_500_INTERNAL_SERVER_ERROR,
+            detail=f"Database error: {str(exc)}"
+        )
+
+    return {
+        "status":   "added",
+        "message":  f"'{movie_row.title}' has been added to your watchlist! 🎬",
+        "entry": {
+            "id":        row.id,
+            "movie_id":  movie_row.movie_id,
+            "title":     movie_row.title,
+            "genres":    movie_row.genres.split("|") if movie_row.genres else [],
+            "tmdb_id":   movie_row.tmdb_id,
+            "note":      payload.note,
+            "added_at":  str(row.added_at),
+        }
+    }
+
+
+# ── GET /api/watchlist ─────────────────────────────────────────────────────────
+
+@app.get("/api/watchlist", summary="Get your full watchlist")
+def get_watchlist(
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Return your complete 'Want to Watch' list, most recently added first.
+
+    Each entry includes the full movie metadata (title, genres, tmdb_id) so
+    the frontend can render a rich card without making additional API calls.
+    """
+    rows = db.execute(
+        text("""
+            SELECT
+                w.id,
+                w.movie_id,
+                m.title,
+                m.genres,
+                m.tmdb_id,
+                w.note,
+                w.added_at
+            FROM watchlist w
+            JOIN movies m ON m.movie_id = w.movie_id
+            WHERE w.user_id = :uid
+            ORDER BY w.added_at DESC
+        """),
+        {"uid": current_user.id}
+    ).fetchall()
+
+    return {
+        "user_id": current_user.id,
+        "total":   len(rows),
+        "watchlist": [
+            {
+                "id":       r.id,
+                "movie_id": r.movie_id,
+                "title":    r.title,
+                "genres":   r.genres.split("|") if r.genres else [],
+                "tmdb_id":  r.tmdb_id,
+                "note":     r.note,
+                "added_at": str(r.added_at),
+            }
+            for r in rows
+        ]
+    }
+
+
+# ── DELETE /api/watchlist/{movie_id} ──────────────────────────────────────────
+
+@app.delete("/api/watchlist/{movie_id}", status_code=200,
+            summary="Remove a movie from your watchlist")
+def remove_from_watchlist(
+    movie_id: int = Path(..., gt=0),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Manually remove a movie from your 'Want to Watch' list.
+
+    This is for cases where you changed your mind and no longer want to
+    watch a film — distinct from rating it (which implies you watched it).
+
+    Returns **404** if the movie wasn't in your list to begin with.
+    """
+    result = db.execute(
+        text("DELETE FROM watchlist WHERE user_id = :uid AND movie_id = :mid"),
+        {"uid": current_user.id, "mid": movie_id}
+    )
+    db.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Movie {movie_id} is not in your watchlist."
+        )
+
+    return {"status": "removed", "message": f"Movie {movie_id} removed from your watchlist."}
+
+
+# ── PATCH /api/watchlist/{movie_id} ──────────────────────────────────────────
+
+@app.patch("/api/watchlist/{movie_id}", status_code=200,
+           summary="Update the note on a watchlist entry")
+def update_watchlist_note(
+    movie_id: int = Path(..., gt=0),
+    payload: WatchlistUpdateRequest = Body(...),
+    db: Session = Depends(get_db),
+    current_user=Depends(get_current_user)
+):
+    """Edit or clear the personal note attached to a watchlist entry.
+
+    Useful for updating context like "watch with Sarah" → "already watched
+    alone, want to rewatch with Sarah". Send `note: null` to clear it.
+
+    Returns **404** if the movie isn't in your watchlist.
+    """
+    result = db.execute(
+        text("""
+            UPDATE watchlist
+            SET note = :note
+            WHERE user_id = :uid AND movie_id = :mid
+        """),
+        {"note": payload.note, "uid": current_user.id, "mid": movie_id}
+    )
+    db.commit()
+
+    if result.rowcount == 0:
+        raise HTTPException(
+            status_code=status.HTTP_404_NOT_FOUND,
+            detail=f"Movie {movie_id} is not in your watchlist."
+        )
+
+    return {
+        "status":  "updated",
+        "message": f"Note for movie {movie_id} updated.",
+        "note":    payload.note,
+    }
+
 
 # ==========================================================
 # 8. PHASE A5 — USER PROFILE ENDPOINT
