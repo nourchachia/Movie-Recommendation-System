@@ -17,6 +17,16 @@ export interface RatedMovie {
   rated_at: string | null;
 }
 
+export interface WatchlistMovie {
+  id: number;
+  movie_id: number;
+  title: string;
+  genres: string[];
+  tmdb_id: number;
+  note: string | null;
+  added_at: string;
+}
+
 // ── Rating endpoints ──────────────────────────────────────────────────────────
 
 /** POST /api/ratings — submit or update a movie rating (1–5) */
@@ -50,7 +60,68 @@ export async function getMyRatings(
   return res.json();
 }
 
-// ── Watchlist (localStorage) ──────────────────────────────────────────────────
+// ── Watchlist API endpoints ───────────────────────────────────────────────────
+
+/** GET /api/watchlist — fetch the current user's full watchlist */
+export async function getMyWatchlist(
+  accessToken: string
+): Promise<{ user_id: number; total: number; watchlist: WatchlistMovie[] }> {
+  const res = await fetch(`${API}/api/watchlist`, {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) throw new Error('Failed to fetch watchlist');
+  return res.json();
+}
+
+/** POST /api/watchlist — add a movie; returns 409 if already present */
+export async function addToWatchlist(
+  movieId: number,
+  accessToken: string,
+  note?: string | null
+): Promise<void> {
+  const res = await fetch(`${API}/api/watchlist`, {
+    method: 'POST',
+    headers: {
+      'Content-Type': 'application/json',
+      Authorization: `Bearer ${accessToken}`,
+    },
+    body: JSON.stringify({ movie_id: movieId, note: note ?? null }),
+  });
+  if (!res.ok && res.status !== 409) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.detail ?? 'Failed to add to watchlist');
+  }
+}
+
+/** DELETE /api/watchlist/{movie_id} — remove a movie from the watchlist */
+export async function removeFromWatchlist(
+  movieId: number,
+  accessToken: string
+): Promise<void> {
+  const res = await fetch(`${API}/api/watchlist/${movieId}`, {
+    method: 'DELETE',
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok && res.status !== 404) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.detail ?? 'Failed to remove from watchlist');
+  }
+}
+
+/** Check if a specific movie is in the watchlist */
+export async function isInWatchlist(
+  movieId: number,
+  accessToken: string
+): Promise<boolean> {
+  try {
+    const data = await getMyWatchlist(accessToken);
+    return data.watchlist.some((m) => m.movie_id === movieId);
+  } catch {
+    return false;
+  }
+}
+
+// ── Watchlist (localStorage — legacy fallback) ────────────────────────────────
 
 const WATCHLIST_KEY    = 'flicker_watchlist';
 const LOCAL_RATINGS_KEY = 'flicker_ratings';
@@ -60,7 +131,7 @@ export function getWatchlist(): number[] {
   try { return JSON.parse(localStorage.getItem(WATCHLIST_KEY) ?? '[]'); } catch { return []; }
 }
 
-/** Toggle a movie in watchlist. Returns true if now added, false if removed. */
+/** @deprecated Use addToWatchlist / removeFromWatchlist (real API) instead */
 export function toggleWatchlist(movieId: number): boolean {
   const list = getWatchlist();
   const inList = list.includes(movieId);

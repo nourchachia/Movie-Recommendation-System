@@ -4,7 +4,7 @@ import { useEffect, useState, useCallback } from 'react';
 import { X, Play, Star, Clock, Calendar, Loader2, ExternalLink, Bookmark, BookmarkCheck, CheckCircle2 } from 'lucide-react';
 import type { Movie } from '@/lib/mockApi';
 import { useAuth } from '@/context/AuthContext';
-import { submitRating, toggleWatchlist, getWatchlist, getLocalRating, setLocalRating } from '@/lib/api';
+import { submitRating, addToWatchlist, removeFromWatchlist, isInWatchlist, getLocalRating, setLocalRating } from '@/lib/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -104,14 +104,22 @@ export default function MovieModal({ movie, onClose }: MovieModalProps) {
     const [ratingDone,   setRatingDone]   = useState(false);
 
     // ── Watchlist state ───────────────────────────────────────────────────────
-    const [watchlisted, setWatchlisted] = useState(false);
+    const [watchlisted, setWatchlisted]           = useState(false);
+    const [watchlistLoading, setWatchlistLoading] = useState(false);
+    const [showNoteInput, setShowNoteInput]       = useState(false);
+    const [noteText, setNoteText]                 = useState('');
 
-    // Load saved rating + watchlist status from localStorage on movie change
+    // Load saved rating from localStorage; check real watchlist status from backend
     useEffect(() => {
         setUserRating(getLocalRating(movie.movie_id));
-        setWatchlisted(getWatchlist().includes(movie.movie_id));
         setRatingDone(false);
-    }, [movie.movie_id]);
+        setWatchlisted(false);
+        setShowNoteInput(false);
+        setNoteText('');
+        if (accessToken) {
+            isInWatchlist(movie.movie_id, accessToken).then(setWatchlisted).catch(() => {});
+        }
+    }, [movie.movie_id, accessToken]);
 
     const handleRate = async (stars: number) => {
         if (!accessToken) return;
@@ -126,9 +134,32 @@ export default function MovieModal({ movie, onClose }: MovieModalProps) {
         finally { setRatingLoading(false); }
     };
 
-    const handleWatchlist = () => {
-        const nowIn = toggleWatchlist(movie.movie_id);
-        setWatchlisted(nowIn);
+    // First click → reveal note input; second click (Save) → call API
+    const handleWatchlistClick = () => {
+        if (watchlisted || watchlistLoading) return;
+        setShowNoteInput(true);
+    };
+
+    const handleWatchlistSave = async () => {
+        if (!accessToken || watchlistLoading) return;
+        setWatchlistLoading(true);
+        try {
+            await addToWatchlist(movie.movie_id, accessToken, noteText.trim() || null);
+            setWatchlisted(true);
+            setShowNoteInput(false);
+        } catch { /* silently ignore */ }
+        finally { setWatchlistLoading(false); }
+    };
+
+    const handleWatchlistRemove = async () => {
+        if (!accessToken || watchlistLoading) return;
+        setWatchlistLoading(true);
+        try {
+            await removeFromWatchlist(movie.movie_id, accessToken);
+            setWatchlisted(false);
+            setNoteText('');
+        } catch { /* silently ignore */ }
+        finally { setWatchlistLoading(false); }
     };
 
     // Fetch trailer + details from our server-side proxy route
@@ -501,25 +532,129 @@ export default function MovieModal({ movie, onClose }: MovieModalProps) {
                                 <ExternalLink size={14} /> Open on YouTube
                             </a>
                         )}
-                        {/* Watchlist button — only when logged in */}
-                        {user && (
+                        {/* Watchlist — only when logged in */}
+                        {user && !watchlisted && !showNoteInput && (
                             <button
-                                onClick={handleWatchlist}
+                                onClick={handleWatchlistClick}
+                                disabled={watchlistLoading}
                                 style={{
                                     display: 'flex', alignItems: 'center', gap: '8px',
                                     padding: '11px 20px', borderRadius: '8px',
-                                    background: watchlisted ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.07)',
-                                    border: watchlisted ? '1px solid rgba(34,197,94,0.35)' : '1px solid rgba(255,255,255,0.15)',
-                                    color: watchlisted ? '#22C55E' : 'white',
-                                    fontWeight: 600, fontSize: '14px', cursor: 'pointer',
+                                    background: 'rgba(255,255,255,0.07)',
+                                    border: '1px solid rgba(255,255,255,0.15)',
+                                    color: 'white', fontWeight: 600, fontSize: '14px',
+                                    cursor: 'pointer', transition: 'all 0.2s',
+                                }}
+                                onMouseEnter={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.12)')}
+                                onMouseLeave={(e) => (e.currentTarget.style.background = 'rgba(255,255,255,0.07)')}
+                            >
+                                <Bookmark size={15} />
+                                + Watchlist
+                            </button>
+                        )}
+
+                        {/* Already watchlisted → green button + remove */}
+                        {user && watchlisted && (
+                            <button
+                                onClick={handleWatchlistRemove}
+                                disabled={watchlistLoading}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: '8px',
+                                    padding: '11px 20px', borderRadius: '8px',
+                                    background: 'rgba(34,197,94,0.12)',
+                                    border: '1px solid rgba(34,197,94,0.35)',
+                                    color: '#22C55E', fontWeight: 600, fontSize: '14px',
+                                    cursor: watchlistLoading ? 'default' : 'pointer',
+                                    opacity: watchlistLoading ? 0.7 : 1,
                                     transition: 'all 0.2s',
                                 }}
                             >
-                                {watchlisted ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
-                                {watchlisted ? 'In Watchlist' : 'Add to Watchlist'}
+                                {watchlistLoading
+                                    ? <Loader2 size={15} style={{ animation: 'spin 1s linear infinite' }} />
+                                    : <BookmarkCheck size={15} />
+                                }
+                                In Watchlist
                             </button>
                         )}
                     </div>
+
+                    {/* ── Note input (shown after clicking + Watchlist) ── */}
+                    {user && showNoteInput && !watchlisted && (
+                        <div style={{
+                            marginTop: '16px',
+                            padding: '14px 16px',
+                            borderRadius: '12px',
+                            background: 'rgba(255,255,255,0.04)',
+                            border: '1px solid rgba(255,255,255,0.1)',
+                            animation: 'slideUpModal 0.2s ease',
+                        }}>
+                            <p style={{
+                                color: 'var(--color-muted)', fontSize: '12px',
+                                fontWeight: 600, letterSpacing: '0.07em',
+                                textTransform: 'uppercase', marginBottom: '10px',
+                            }}>
+                                Add a note <span style={{ fontWeight: 400, textTransform: 'none', opacity: 0.6 }}>(optional)</span>
+                            </p>
+                            <input
+                                autoFocus
+                                maxLength={300}
+                                value={noteText}
+                                onChange={(e) => setNoteText(e.target.value)}
+                                onKeyDown={(e) => { if (e.key === 'Enter') handleWatchlistSave(); if (e.key === 'Escape') setShowNoteInput(false); }}
+                                placeholder='e.g. "watch with Sarah", "sequel to X"…'
+                                style={{
+                                    width: '100%', boxSizing: 'border-box',
+                                    padding: '9px 13px', borderRadius: '8px',
+                                    background: 'rgba(255,255,255,0.06)',
+                                    border: '1px solid rgba(255,255,255,0.15)',
+                                    color: 'white', fontSize: '13px',
+                                    outline: 'none', marginBottom: '12px',
+                                }}
+                            />
+                            <div style={{ display: 'flex', gap: '8px' }}>
+                                <button
+                                    onClick={handleWatchlistSave}
+                                    disabled={watchlistLoading}
+                                    style={{
+                                        display: 'flex', alignItems: 'center', gap: '7px',
+                                        padding: '9px 20px', borderRadius: '8px',
+                                        background: '#E50914', border: 'none',
+                                        color: 'white', fontWeight: 700, fontSize: '13px',
+                                        cursor: watchlistLoading ? 'default' : 'pointer',
+                                        opacity: watchlistLoading ? 0.7 : 1,
+                                        transition: 'background 0.2s',
+                                    }}
+                                    onMouseEnter={(e) => { if (!watchlistLoading) e.currentTarget.style.background = '#FF1A1A'; }}
+                                    onMouseLeave={(e) => { e.currentTarget.style.background = '#E50914'; }}
+                                >
+                                    {watchlistLoading
+                                        ? <Loader2 size={13} style={{ animation: 'spin 1s linear infinite' }} />
+                                        : <BookmarkCheck size={13} />
+                                    }
+                                    Save to Watchlist
+                                </button>
+                                <button
+                                    onClick={() => setShowNoteInput(false)}
+                                    style={{
+                                        padding: '9px 16px', borderRadius: '8px',
+                                        background: 'transparent',
+                                        border: '1px solid rgba(255,255,255,0.12)',
+                                        color: 'rgba(163,163,163,1)', fontSize: '13px',
+                                        cursor: 'pointer', transition: 'border-color 0.2s',
+                                    }}
+                                    onMouseEnter={(e) => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.3)')}
+                                    onMouseLeave={(e) => (e.currentTarget.style.borderColor = 'rgba(255,255,255,0.12)')}
+                                >
+                                    Cancel
+                                </button>
+                            </div>
+                            {noteText.length > 250 && (
+                                <p style={{ color: noteText.length >= 300 ? '#FF6B6B' : '#F59E0B', fontSize: '11px', marginTop: '6px' }}>
+                                    {300 - noteText.length} characters remaining
+                                </p>
+                            )}
+                        </div>
+                    )}
                 </div>
             </div>
 
