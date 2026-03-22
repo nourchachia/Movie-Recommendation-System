@@ -1,8 +1,10 @@
 'use client';
 
 import { useEffect, useState, useCallback } from 'react';
-import { X, Play, Star, Clock, Calendar, Loader2, ExternalLink } from 'lucide-react';
+import { X, Play, Star, Clock, Calendar, Loader2, ExternalLink, Bookmark, BookmarkCheck, CheckCircle2 } from 'lucide-react';
 import type { Movie } from '@/lib/mockApi';
+import { useAuth } from '@/context/AuthContext';
+import { submitRating, toggleWatchlist, getWatchlist, getLocalRating, setLocalRating } from '@/lib/api';
 
 // ─── Types ────────────────────────────────────────────────────────────────────
 
@@ -25,12 +27,109 @@ interface MovieModalProps {
     onClose: () => void;
 }
 
+// ─── Interactive Star Rating (supports half-stars) ───────────────────────────
+function StarRating({ value, onRate, disabled }: { value: number | null; onRate: (v: number) => void; disabled?: boolean }) {
+    const [hover, setHover] = useState<number>(0);
+    const display = hover || value || 0;
+
+    return (
+        <div style={{ display: 'flex', gap: '4px' }} onMouseLeave={() => setHover(0)}>
+            {[1, 2, 3, 4, 5].map((i) => {
+                const half = i - 0.5;
+                const isFull = display >= i;
+                const isHalf = !isFull && display >= half;
+
+                return (
+                    <div
+                        key={i}
+                        style={{ position: 'relative', width: '30px', height: '30px', cursor: disabled ? 'default' : 'pointer', flexShrink: 0 }}
+                    >
+                        {/* Empty star (base layer) */}
+                        <span style={{
+                            position: 'absolute', inset: 0,
+                            fontSize: '28px', lineHeight: '30px', textAlign: 'center',
+                            color: 'rgba(255,255,255,0.15)', userSelect: 'none', pointerEvents: 'none',
+                        }}>★</span>
+
+                        {/* Filled star (clipped to half or full) */}
+                        {(isFull || isHalf) && (
+                            <span style={{
+                                position: 'absolute', inset: 0,
+                                fontSize: '28px', lineHeight: '30px', textAlign: 'center',
+                                color: '#F59E0B', userSelect: 'none', pointerEvents: 'none',
+                                clipPath: isHalf ? 'inset(0 50% 0 0)' : 'none',
+                                transition: 'clip-path 0s',
+                            }}>★</span>
+                        )}
+
+                        {/* Left half click zone → i - 0.5 */}
+                        <div
+                            style={{ position: 'absolute', left: 0, top: 0, width: '50%', height: '100%', zIndex: 2 }}
+                            onMouseEnter={() => !disabled && setHover(half)}
+                            onClick={() => !disabled && onRate(half)}
+                            aria-label={`Rate ${half} stars`}
+                        />
+                        {/* Right half click zone → i */}
+                        <div
+                            style={{ position: 'absolute', right: 0, top: 0, width: '50%', height: '100%', zIndex: 2 }}
+                            onMouseEnter={() => !disabled && setHover(i)}
+                            onClick={() => !disabled && onRate(i)}
+                            aria-label={`Rate ${i} stars`}
+                        />
+                    </div>
+                );
+            })}
+
+            {/* Numeric label */}
+            {display > 0 && (
+                <span style={{ color: 'var(--color-muted)', fontSize: '13px', alignSelf: 'center', marginLeft: '4px', minWidth: '28px' }}>
+                    {display}/5
+                </span>
+            )}
+        </div>
+    );
+}
+
 // ─── Component ────────────────────────────────────────────────────────────────
 
 export default function MovieModal({ movie, onClose }: MovieModalProps) {
+    const { user, accessToken } = useAuth();
     const [data, setData] = useState<TrailerData | null>(null);
     const [loading, setLoading] = useState(true);
     const [playTrailer, setPlayTrailer] = useState(false);
+
+    // ── Rating state ──────────────────────────────────────────────────────────
+    const [userRating,   setUserRating]   = useState<number | null>(null);
+    const [ratingLoading, setRatingLoading] = useState(false);
+    const [ratingDone,   setRatingDone]   = useState(false);
+
+    // ── Watchlist state ───────────────────────────────────────────────────────
+    const [watchlisted, setWatchlisted] = useState(false);
+
+    // Load saved rating + watchlist status from localStorage on movie change
+    useEffect(() => {
+        setUserRating(getLocalRating(movie.movie_id));
+        setWatchlisted(getWatchlist().includes(movie.movie_id));
+        setRatingDone(false);
+    }, [movie.movie_id]);
+
+    const handleRate = async (stars: number) => {
+        if (!accessToken) return;
+        setRatingLoading(true);
+        try {
+            await submitRating(movie.movie_id, stars, accessToken);
+            setUserRating(stars);
+            setLocalRating(movie.movie_id, stars);
+            setRatingDone(true);
+            setTimeout(() => setRatingDone(false), 2000);
+        } catch { /* silently fail */ }
+        finally { setRatingLoading(false); }
+    };
+
+    const handleWatchlist = () => {
+        const nowIn = toggleWatchlist(movie.movie_id);
+        setWatchlisted(nowIn);
+    };
 
     // Fetch trailer + details from our server-side proxy route
     useEffect(() => {
@@ -293,17 +392,15 @@ export default function MovieModal({ movie, onClose }: MovieModalProps) {
                                 {year}
                             </span>
                         )}
-                        <span style={{
-                            padding: '3px 10px',
-                            borderRadius: '99px',
-                            background: 'rgba(229,9,20,0.15)',
-                            border: '1px solid rgba(229,9,20,0.3)',
-                            color: '#FF6B6B',
-                            fontSize: '12px',
-                            fontWeight: 600,
-                        }}>
-                            {movie.match_score}% Match
-                        </span>
+                        {movie.match_score > 0 && (
+                            <span style={{
+                                padding: '3px 10px', borderRadius: '99px',
+                                background: 'rgba(229,9,20,0.15)', border: '1px solid rgba(229,9,20,0.3)',
+                                color: '#FF6B6B', fontSize: '12px', fontWeight: 600,
+                            }}>
+                                {movie.match_score}% Match
+                            </span>
+                        )}
                     </div>
 
                     {/* Genre chips */}
@@ -334,10 +431,36 @@ export default function MovieModal({ movie, onClose }: MovieModalProps) {
                             color: 'rgba(255,255,255,0.75)',
                             fontSize: '14px',
                             lineHeight: 1.75,
-                            marginBottom: '24px',
+                            marginBottom: '20px',
                         }}>
                             {overview}
                         </p>
+                    )}
+
+                    {/* ── Rate this movie ── */}
+                    {user && (
+                        <div style={{
+                            marginBottom: '20px', padding: '16px',
+                            borderRadius: '12px',
+                            background: 'rgba(255,255,255,0.04)',
+                            border: '1px solid rgba(255,255,255,0.08)',
+                        }}>
+                            <p style={{ color: 'var(--color-muted)', fontSize: '12px', fontWeight: 600, marginBottom: '10px', letterSpacing: '0.08em', textTransform: 'uppercase' }}>
+                                {userRating ? 'Your rating' : 'Rate this movie'}
+                            </p>
+                            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                                <StarRating value={userRating} onRate={handleRate} disabled={ratingLoading} />
+                                {ratingLoading && <Loader2 size={14} color="#E50914" style={{ animation: 'spin 1s linear infinite', flexShrink: 0 }} />}
+                                {ratingDone && (
+                                    <span style={{ display: 'flex', alignItems: 'center', gap: '5px', color: '#22C55E', fontSize: '13px', fontWeight: 600 }}>
+                                        <CheckCircle2 size={14} /> Saved!
+                                    </span>
+                                )}
+                                {userRating && !ratingDone && !ratingLoading && (
+                                    <span style={{ color: 'var(--color-muted)', fontSize: '12px' }}>{userRating}/5</span>
+                                )}
+                            </div>
+                        </div>
                     )}
 
                     {/* Action buttons */}
@@ -377,6 +500,24 @@ export default function MovieModal({ movie, onClose }: MovieModalProps) {
                             >
                                 <ExternalLink size={14} /> Open on YouTube
                             </a>
+                        )}
+                        {/* Watchlist button — only when logged in */}
+                        {user && (
+                            <button
+                                onClick={handleWatchlist}
+                                style={{
+                                    display: 'flex', alignItems: 'center', gap: '8px',
+                                    padding: '11px 20px', borderRadius: '8px',
+                                    background: watchlisted ? 'rgba(34,197,94,0.12)' : 'rgba(255,255,255,0.07)',
+                                    border: watchlisted ? '1px solid rgba(34,197,94,0.35)' : '1px solid rgba(255,255,255,0.15)',
+                                    color: watchlisted ? '#22C55E' : 'white',
+                                    fontWeight: 600, fontSize: '14px', cursor: 'pointer',
+                                    transition: 'all 0.2s',
+                                }}
+                            >
+                                {watchlisted ? <BookmarkCheck size={15} /> : <Bookmark size={15} />}
+                                {watchlisted ? 'In Watchlist' : 'Add to Watchlist'}
+                            </button>
                         )}
                     </div>
                 </div>

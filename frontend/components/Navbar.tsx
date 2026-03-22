@@ -2,11 +2,13 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Search, User, Bookmark, TrendingUp, Compass, Home } from 'lucide-react';
+import { Search, Home, TrendingUp, Compass, Bookmark, BookMarked, UserCircle, LogOut } from 'lucide-react';
+import { useAuth } from '@/context/AuthContext';
 
 export default function Navbar() {
     const [scrolled, setScrolled] = useState(false);
     const [searchOpen, setSearchOpen] = useState(false);
+    const { user, logout, isLoading } = useAuth();
 
     useEffect(() => {
         const onScroll = () => setScrolled(window.scrollY > 20);
@@ -14,10 +16,30 @@ export default function Navbar() {
         return () => window.removeEventListener('scroll', onScroll);
     }, []);
 
+    const initials = user?.username?.slice(0, 2).toUpperCase() ?? '';
+
+    // Nav links differ by auth state
+    const guestLinks = [
+        { label: 'Home',     href: '/',         icon: <Home size={15} /> },
+        { label: 'Trending', href: '/trending',  icon: <TrendingUp size={15} /> },
+    ];
+
+    const authLinks = [
+        { label: 'Home',      href: '/',          icon: <Home size={15} /> },
+        { label: 'Discover',  href: '/discover',  icon: <Compass size={15} /> },
+        { label: 'Trending',  href: '/trending',  icon: <TrendingUp size={15} /> },
+        { label: 'My List',   href: '/mylist',    icon: <Bookmark size={15} /> },
+        { label: 'Watchlist', href: '/watchlist', icon: <BookMarked size={15} /> },
+        { label: 'Account',   href: '/account',   icon: <UserCircle size={15} /> },
+    ];
+
+    const links = user ? authLinks : guestLinks;
+
     return (
         <header
-            className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${scrolled ? 'navbar-blur' : 'bg-gradient-to-b from-black/80 to-transparent'
-                }`}
+            className={`fixed top-0 left-0 right-0 z-50 transition-all duration-300 ${
+                scrolled ? 'navbar-blur' : 'bg-gradient-to-b from-black/80 to-transparent'
+            }`}
         >
             <nav
                 className="mx-auto max-w-[1440px] flex items-center justify-between"
@@ -44,32 +66,23 @@ export default function Navbar() {
                 </Link>
 
                 {/* Nav Links */}
-                <ul className="hidden md:flex items-center" style={{ gap: '8px' }}>
-                    {[
-                        { label: 'Home', href: '/', icon: <Home size={15} />, active: true },
-                        { label: 'Discover', href: '/discover', icon: <Compass size={15} /> },
-                        { label: 'Trending', href: '/trending', icon: <TrendingUp size={15} /> },
-                        { label: 'My List', href: '/mylist', icon: <Bookmark size={15} /> },
-                    ].map(({ label, href, icon, active }) => (
+                <ul className="hidden md:flex items-center" style={{ gap: '4px' }}>
+                    {links.map(({ label, href, icon }) => (
                         <li key={label}>
                             <Link
                                 href={href}
-                                className={`relative flex items-center font-medium transition-all duration-200 rounded-md ${active ? 'text-white' : 'text-[#A3A3A3] hover:text-white'
-                                    }`}
-                                style={{ gap: '6px', padding: '10px 20px', fontSize: '16px' }}
+                                className="relative flex items-center font-medium text-[#A3A3A3] hover:text-white transition-all duration-200 rounded-md"
+                                style={{ gap: '6px', padding: '8px 16px', fontSize: '15px' }}
                             >
-                                <span className={active ? 'text-[#E50914]' : ''}>{icon}</span>
+                                <span>{icon}</span>
                                 {label}
-                                {active && (
-                                    <span className="absolute bottom-0 left-4 right-4 h-[2px] bg-[#E50914] rounded-full" />
-                                )}
                             </Link>
                         </li>
                     ))}
                 </ul>
 
                 {/* Right Actions */}
-                <div className="flex items-center" style={{ gap: '12px' }}>
+                <div className="flex items-center" style={{ gap: '10px' }}>
                     {/* Search */}
                     <div className={`flex items-center transition-all duration-300 ${searchOpen ? 'w-48' : 'w-9'} overflow-hidden`}>
                         {searchOpen && (
@@ -82,22 +95,54 @@ export default function Navbar() {
                         )}
                         <button
                             onClick={() => setSearchOpen(true)}
-                            className={`flex-shrink-0 w-9 h-9 flex items-center justify-center text-[#A3A3A3] hover:text-white transition-colors ${searchOpen ? 'bg-[#E50914] text-white rounded-r-md' : 'hover:bg-white/10 rounded-full'
-                                }`}
+                            className={`flex-shrink-0 w-9 h-9 flex items-center justify-center text-[#A3A3A3] hover:text-white transition-colors ${
+                                searchOpen ? 'bg-[#E50914] text-white rounded-r-md' : 'hover:bg-white/10 rounded-full'
+                            }`}
                         >
                             <Search size={18} />
                         </button>
                     </div>
 
-                    {/* Sign In button */}
-                    <Link
-                        href="/login"
-                        className="flex items-center font-semibold text-white border border-white/30 hover:border-white hover:bg-white/10 rounded-lg transition-all duration-200"
-                        style={{ gap: '7px', padding: '8px 20px', fontSize: '15px' }}
-                    >
-                        <User size={16} />
-                        Sign In
-                    </Link>
+                    {/* Auth area — hidden while loading to avoid flash */}
+                    {!isLoading && (
+                        user ? (
+                            /* Logged in: avatar + Log Out */
+                            <>
+                                <div
+                                    className="w-9 h-9 rounded-full bg-[#E50914] flex items-center justify-center font-bold text-white text-sm shadow-lg shadow-red-900/30"
+                                    title={user.username}
+                                >
+                                    {initials}
+                                </div>
+                                <button
+                                    onClick={logout}
+                                    className="flex items-center font-semibold text-[#A3A3A3] hover:text-white border border-white/20 hover:border-white/50 rounded-lg transition-all duration-200"
+                                    style={{ gap: '6px', padding: '8px 16px', fontSize: '14px' }}
+                                >
+                                    <LogOut size={15} />
+                                    Log Out
+                                </button>
+                            </>
+                        ) : (
+                            /* Logged out: Sign In + Sign Up */
+                            <>
+                                <Link
+                                    href="/login"
+                                    className="font-semibold text-[#A3A3A3] hover:text-white transition-colors"
+                                    style={{ fontSize: '15px', padding: '8px 12px' }}
+                                >
+                                    Sign In
+                                </Link>
+                                <Link
+                                    href="/login?tab=signup"
+                                    className="font-semibold text-white bg-[#E50914] hover:bg-[#FF1A1A] rounded-lg transition-all duration-200"
+                                    style={{ fontSize: '15px', padding: '8px 20px' }}
+                                >
+                                    Sign Up
+                                </Link>
+                            </>
+                        )
+                    )}
                 </div>
             </nav>
         </header>

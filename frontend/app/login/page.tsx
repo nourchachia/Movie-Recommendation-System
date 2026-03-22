@@ -1,6 +1,7 @@
 'use client';
 
 import { useState } from 'react';
+import { useRouter } from 'next/navigation';
 import Link from 'next/link';
 import {
   Eye,
@@ -13,7 +14,10 @@ import {
   CheckCircle2,
   Film,
   Sparkles,
+  AlertCircle,
 } from 'lucide-react';
+import { useAuth } from '@/context/AuthContext';
+import { forgotPassword as apiForgotPassword } from '@/lib/auth';
 
 // ────────────────────────────────────────────────────────────
 // Types
@@ -164,13 +168,15 @@ function PasswordStrength({ password }: { password: string }) {
 // ────────────────────────────────────────────────────────────
 export default function LoginPage() {
   const [view, setView] = useState<View>('signin');
+  const { login: authLogin, register: authRegister } = useAuth();
+  const router = useRouter();
 
   // ─── Sign In state ───
   const [siEmail, setSiEmail] = useState('');
   const [siPassword, setSiPassword] = useState('');
   const [siShowPw, setSiShowPw] = useState(false);
   const [siLoading, setSiLoading] = useState(false);
-  const [siErrors, setSiErrors] = useState<{ email?: string; password?: string }>({});
+  const [siErrors, setSiErrors] = useState<{ email?: string; password?: string; api?: string }>({});
 
   // ─── Sign Up state ───
   const [suName, setSuName] = useState('');
@@ -185,6 +191,7 @@ export default function LoginPage() {
     email?: string;
     password?: string;
     confirm?: string;
+    api?: string;
   }>({});
   const [suDone, setSuDone] = useState(false);
 
@@ -208,9 +215,14 @@ export default function LoginPage() {
     if (Object.keys(errors).length) { setSiErrors(errors); return; }
     setSiErrors({});
     setSiLoading(true);
-    // TODO: wire to real auth endpoint
-    await new Promise((r) => setTimeout(r, 1500));
-    setSiLoading(false);
+    try {
+      await authLogin(siEmail, siPassword);
+      router.push('/');
+    } catch (err: unknown) {
+      setSiErrors({ api: err instanceof Error ? err.message : 'Sign in failed.' });
+    } finally {
+      setSiLoading(false);
+    }
   };
 
   // ─── Sign Up submit ───
@@ -225,10 +237,15 @@ export default function LoginPage() {
     if (Object.keys(errors).length) { setSuErrors(errors); return; }
     setSuErrors({});
     setSuLoading(true);
-    // TODO: wire to real auth endpoint
-    await new Promise((r) => setTimeout(r, 1500));
-    setSuLoading(false);
-    setSuDone(true);
+    try {
+      // username = trimmed name (backend validates alphanumeric + underscore)
+      const username = suName.trim().replace(/\s+/g, '_');
+      await authRegister(username, suEmail, suPassword);
+      router.push('/');
+    } catch (err: unknown) {
+      setSuErrors({ api: err instanceof Error ? err.message : 'Registration failed.' });
+      setSuLoading(false);
+    }
   };
 
   // ─── Forgot Password submit ───
@@ -238,10 +255,14 @@ export default function LoginPage() {
     if (emailErr) { setFpError(emailErr); return; }
     setFpError('');
     setFpLoading(true);
-    // TODO: wire to real auth endpoint
-    await new Promise((r) => setTimeout(r, 1400));
-    setFpLoading(false);
-    setFpDone(true);
+    try {
+      await apiForgotPassword(fpEmail);
+      setFpDone(true);
+    } catch (err: unknown) {
+      setFpError(err instanceof Error ? err.message : 'Something went wrong.');
+    } finally {
+      setFpLoading(false);
+    }
   };
 
   // ────────────────────────────────────────────────────────
@@ -508,13 +529,13 @@ function SignInForm({
   password: string; setPassword: (v: string) => void;
   showPw: boolean; setShowPw: (v: boolean) => void;
   loading: boolean;
-  errors: { email?: string; password?: string };
+  errors: { email?: string; password?: string; api?: string };
   onSubmit: (e: React.FormEvent) => void;
   onSignUp: () => void;
   onForgot: () => void;
 }) {
   return (
-    <form onSubmit={onSubmit} className="auth-form-anim" noValidate style={{ display: 'flex', flexDirection: 'column', gap: '28px' }}>
+    <form onSubmit={onSubmit} className="auth-form-anim" noValidate style={{ display: 'flex', flexDirection: 'column', gap: '22px' }}>
       {/* Header */}
       <div>
         <h2 style={{ color: 'white', fontSize: '26px', fontWeight: 700, marginBottom: '6px' }}>Welcome back</h2>
@@ -553,6 +574,19 @@ function SignInForm({
           </button>
         </div>
       </div>
+
+      {/* API error banner */}
+      {errors.api && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '10px',
+          padding: '12px 14px', borderRadius: '10px',
+          background: 'rgba(229,9,20,0.12)', border: '1px solid rgba(229,9,20,0.3)',
+          color: '#FF6B6B', fontSize: '14px',
+        }}>
+          <AlertCircle size={16} style={{ flexShrink: 0 }} />
+          {errors.api}
+        </div>
+      )}
 
       {/* Submit */}
       <button
@@ -614,7 +648,7 @@ function SignUpForm({
   showPw: boolean; setShowPw: (v: boolean) => void;
   showConfirm: boolean; setShowConfirm: (v: boolean) => void;
   loading: boolean;
-  errors: { name?: string; email?: string; password?: string; confirm?: string };
+  errors: { name?: string; email?: string; password?: string; confirm?: string; api?: string };
   done: boolean;
   onSubmit: (e: React.FormEvent) => void;
   onSignIn: () => void;
@@ -701,6 +735,19 @@ function SignUpForm({
           }
         />
       </div>
+
+      {/* API error banner */}
+      {errors.api && (
+        <div style={{
+          display: 'flex', alignItems: 'center', gap: '10px',
+          padding: '12px 14px', borderRadius: '10px',
+          background: 'rgba(229,9,20,0.12)', border: '1px solid rgba(229,9,20,0.3)',
+          color: '#FF6B6B', fontSize: '14px',
+        }}>
+          <AlertCircle size={16} style={{ flexShrink: 0 }} />
+          {errors.api}
+        </div>
+      )}
 
       <button
         type="submit"
