@@ -29,7 +29,7 @@ interface AuthContextType {
   user: AuthUser | null;
   accessToken: string | null;
   isLoading: boolean;
-  login: (email: string, password: string) => Promise<void>;
+  login: (email: string, password: string, totpCode?: string) => Promise<void>;
   register: (username: string, email: string, password: string) => Promise<void>;
   logout: () => void;
 }
@@ -63,8 +63,8 @@ export function AuthProvider({ children }: { children: ReactNode }) {
     restore();
   }, []);
 
-  const login = useCallback(async (email: string, password: string) => {
-    const data = await authApi.login(email, password);
+  const login = useCallback(async (email: string, password: string, totpCode?: string) => {
+    const data = await authApi.login(email, password, totpCode);
     setAccessToken(data.access_token);
     localStorage.setItem(REFRESH_KEY, data.refresh_token);
     setUser(data.user);

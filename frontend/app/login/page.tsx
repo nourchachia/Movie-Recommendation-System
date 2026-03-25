@@ -1,7 +1,7 @@
 'use client';
 
-import { useState } from 'react';
-import { useRouter } from 'next/navigation';
+import { useEffect, useState } from 'react';
+import { useRouter, useSearchParams } from 'next/navigation';
 import Link from 'next/link';
 import {
   Eye,
@@ -167,16 +167,26 @@ function PasswordStrength({ password }: { password: string }) {
 // Main Page
 // ────────────────────────────────────────────────────────────
 export default function LoginPage() {
-  const [view, setView] = useState<View>('signin');
   const { login: authLogin, register: authRegister } = useAuth();
   const router = useRouter();
+  const searchParams = useSearchParams();
+  const [view, setView] = useState<View>('signin');
+
+  // Allow deep-linking: /login?tab=signup opens the Sign Up form directly.
+  useEffect(() => {
+    const tab = searchParams.get('tab');
+    if (tab === 'signup') setView('signup');
+    else if (tab === 'signin') setView('signin');
+  }, [searchParams]);
 
   // ─── Sign In state ───
   const [siEmail, setSiEmail] = useState('');
   const [siPassword, setSiPassword] = useState('');
+  const [siCode, setSiCode] = useState('');
   const [siShowPw, setSiShowPw] = useState(false);
   const [siLoading, setSiLoading] = useState(false);
   const [siErrors, setSiErrors] = useState<{ email?: string; password?: string; api?: string }>({});
+  const [siTwoFaRequired, setSiTwoFaRequired] = useState(false);
 
   // ─── Sign Up state ───
   const [suName, setSuName] = useState('');
@@ -212,14 +222,21 @@ export default function LoginPage() {
     const emailErr = validateEmail(siEmail);
     if (emailErr) errors.email = emailErr;
     if (!siPassword) errors.password = 'Password is required.';
+    if (siTwoFaRequired && siCode.trim().length !== 6) errors.api = 'Enter the 6-digit code sent to your email.';
     if (Object.keys(errors).length) { setSiErrors(errors); return; }
     setSiErrors({});
     setSiLoading(true);
     try {
-      await authLogin(siEmail, siPassword);
+      await authLogin(siEmail, siPassword, siTwoFaRequired ? siCode.trim() : undefined);
       router.push('/');
     } catch (err: unknown) {
-      setSiErrors({ api: err instanceof Error ? err.message : 'Sign in failed.' });
+      const msg = err instanceof Error ? err.message : 'Sign in failed.';
+      if (msg === '2FA_REQUIRED') {
+        setSiTwoFaRequired(true);
+        setSiErrors({ api: 'We emailed you a 6-digit code. Enter it to finish signing in.' });
+      } else {
+        setSiErrors({ api: msg });
+      }
     } finally {
       setSiLoading(false);
     }
@@ -466,6 +483,8 @@ export default function LoginPage() {
               <SignInForm
                 email={siEmail} setEmail={setSiEmail}
                 password={siPassword} setPassword={setSiPassword}
+                code={siCode} setCode={setSiCode}
+                twoFaRequired={siTwoFaRequired}
                 showPw={siShowPw} setShowPw={setSiShowPw}
                 loading={siLoading}
                 errors={siErrors}
@@ -523,10 +542,13 @@ export default function LoginPage() {
 // ────────────────────────────────────────────────────────────
 function SignInForm({
   email, setEmail, password, setPassword,
+  code, setCode, twoFaRequired,
   showPw, setShowPw, loading, errors, onSubmit, onSignUp, onForgot,
 }: {
   email: string; setEmail: (v: string) => void;
   password: string; setPassword: (v: string) => void;
+  code: string; setCode: (v: string) => void;
+  twoFaRequired: boolean;
   showPw: boolean; setShowPw: (v: boolean) => void;
   loading: boolean;
   errors: { email?: string; password?: string; api?: string };
@@ -564,6 +586,18 @@ function SignInForm({
             </button>
           }
         />
+        {twoFaRequired && (
+          <InputField
+            id="si-2fa" label="2FA code (from email)" type="text"
+            value={code} onChange={setCode} placeholder="123456"
+            icon={Sparkles} error={undefined} autoComplete="one-time-code"
+            rightEl={
+              <span style={{ fontSize: '12px', color: 'var(--color-muted)', fontWeight: 700 }}>
+                6 digits
+              </span>
+            }
+          />
+        )}
         <div style={{ textAlign: 'right', marginTop: '-8px' }}>
           <button
             type="button"

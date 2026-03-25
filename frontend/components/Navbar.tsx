@@ -4,6 +4,7 @@ import { useState, useEffect } from 'react';
 import Link from 'next/link';
 import { Search, Home, TrendingUp, Compass, Bookmark, BookMarked, UserCircle, LogOut } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
+import SearchOverlay from '@/components/SearchOverlay';
 
 export default function Navbar() {
     const [scrolled, setScrolled] = useState(false);
@@ -83,25 +84,17 @@ export default function Navbar() {
 
                 {/* Right Actions */}
                 <div className="flex items-center" style={{ gap: '10px' }}>
-                    {/* Search */}
-                    <div className={`flex items-center transition-all duration-300 ${searchOpen ? 'w-48' : 'w-9'} overflow-hidden`}>
-                        {searchOpen && (
-                            <input
-                                autoFocus
-                                onBlur={() => setSearchOpen(false)}
-                                className="w-full bg-[#1C1C1C] border border-[#2A2A2A] text-white text-sm px-3 py-1.5 rounded-l-md outline-none placeholder:text-[#A3A3A3] focus:border-[#E50914] transition-colors"
-                                placeholder="Search movies..."
-                            />
-                        )}
-                        <button
-                            onClick={() => setSearchOpen(true)}
-                            className={`flex-shrink-0 w-9 h-9 flex items-center justify-center text-[#A3A3A3] hover:text-white transition-colors ${
-                                searchOpen ? 'bg-[#E50914] text-white rounded-r-md' : 'hover:bg-white/10 rounded-full'
-                            }`}
-                        >
-                            <Search size={18} />
-                        </button>
-                    </div>
+                    {/* Search icon — opens full overlay */}
+                    <button
+                        onClick={() => setSearchOpen(true)}
+                        className="w-9 h-9 flex items-center justify-center text-[#A3A3A3] hover:text-white hover:bg-white/10 rounded-full transition-colors"
+                        aria-label="Open search"
+                    >
+                        <Search size={18} />
+                    </button>
+
+                    {/* Search overlay (portal) */}
+                    {searchOpen && <SearchOverlay onClose={() => setSearchOpen(false)} />}
 
                     {/* Auth area — hidden while loading to avoid flash */}
                     {!isLoading && (

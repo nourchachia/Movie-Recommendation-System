@@ -155,3 +155,49 @@ export function setLocalRating(movieId: number, rating: number): void {
     localStorage.setItem(LOCAL_RATINGS_KEY, JSON.stringify(all));
   } catch { /* ignore */ }
 }
+
+// ── Trending API endpoints ──────────────────────────────────────────────────
+export interface TrendingByGenreMovie {
+  movie_id: number;
+  title: string;
+  genres: string[];
+  tmdb_id: number;
+  trending_score: number;
+}
+
+export interface TrendingGenreGroup {
+  genre: string;
+  rank: number;
+  liked_count: number;
+  movies: TrendingByGenreMovie[];
+}
+
+export interface TrendingByGenreResponse {
+  user_id: number;
+  max_genres: number;
+  limit: number;
+  genre_groups: TrendingGenreGroup[];
+}
+
+/**
+ * GET /api/trending/by-genre — user-ranked genre buckets.
+ */
+export async function getTrendingByGenre(
+  accessToken: string,
+  options?: { maxGenres?: number; limit?: number }
+): Promise<TrendingByGenreResponse> {
+  const url = new URL(`${API}/api/trending/by-genre`);
+  if (options?.maxGenres) url.searchParams.set('max_genres', String(options.maxGenres));
+  if (options?.limit) url.searchParams.set('limit', String(options.limit));
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.detail ?? 'Failed to fetch trending by genre');
+  }
+
+  return res.json() as Promise<TrendingByGenreResponse>;
+}

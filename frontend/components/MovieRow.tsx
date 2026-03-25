@@ -26,6 +26,8 @@ interface MovieRowProps {
     params?: Record<string, string>;
     /** If true, the Bearer access token is sent in the request header */
     requiresAuth?: boolean;
+    /** If true, the title prop is always used and the API's row_title is ignored */
+    lockTitle?: boolean;
 }
 
 // ── Skeleton card ─────────────────────────────────────────────────────────────
@@ -46,13 +48,14 @@ export default function MovieRow({
     endpoint,
     params = {},
     requiresAuth = false,
+    lockTitle = false,
 }: MovieRowProps) {
     const scrollRef = useRef<HTMLDivElement>(null);
     const { accessToken, isLoading: authLoading } = useAuth();
 
-    const [movies,   setMovies]   = useState<EnrichedMovie[]>(propMovies ?? []);
+    const [movies, setMovies] = useState<EnrichedMovie[]>(propMovies ?? []);
     const [rowTitle, setRowTitle] = useState(title);
-    const [loading,  setLoading]  = useState(!!endpoint);
+    const [loading, setLoading] = useState(!!endpoint);
 
     useEffect(() => {
         if (!endpoint) return;
@@ -76,17 +79,17 @@ export default function MovieRow({
                     movie_id: number; title: string; genres: string[];
                     tmdb_id: number; match_score?: number;
                 }> = data.movies ?? [];
-                setRowTitle(data.row_title ?? title);
+                if (!lockTitle && data.row_title) setRowTitle(data.row_title);
 
                 // Build initial list with picsum placeholders so cards appear immediately
                 const initialMovies: EnrichedMovie[] = raw.map((m) => ({
-                    movie_id:   m.movie_id,
-                    title:      m.title,
-                    year:       0,
-                    genres:     m.genres,
+                    movie_id: m.movie_id,
+                    title: m.title,
+                    year: 0,
+                    genres: m.genres,
                     match_score: m.match_score ?? 0,
-                    tmdb_id:    m.tmdb_id,
-                    posterUrl:  `https://picsum.photos/seed/tmdb${m.tmdb_id}/300/450`,
+                    tmdb_id: m.tmdb_id,
+                    posterUrl: `https://picsum.photos/seed/tmdb${m.tmdb_id}/300/450`,
                 }));
                 setMovies(initialMovies);
 
@@ -109,7 +112,7 @@ export default function MovieRow({
             })
             .catch(() => { /* silently keep empty */ })
             .finally(() => setLoading(false));
-    // eslint-disable-next-line react-hooks/exhaustive-deps
+        // eslint-disable-next-line react-hooks/exhaustive-deps
     }, [endpoint, accessToken, authLoading, requiresAuth]);
 
     const scroll = (dir: 'left' | 'right') => {
