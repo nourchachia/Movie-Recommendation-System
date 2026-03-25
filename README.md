@@ -172,29 +172,6 @@ Key tables:
 
 ---
 
-## 🌐 Frontend (To Be Implemented)
-
-The `frontend/` folder is reserved for the React/Next.js frontend, to be built by the frontend teammate.
-
-**Expected integration points:**
-- Call `POST /auth/login` → store JWT in memory (not localStorage for security)
-- Call `POST /api/chat/sessions` on login → store `session_id`
-- Pass `session_id` with every `POST /api/chat` request
-- Use `GET /api/chat/sessions` to populate a conversation history sidebar
-- Use `POST /api/chat/transcribe` for mic input → auto-submit transcript
-- Display `GET /api/recommendations/top-picks` on the home screen
-
----
-
-## 👥 Team
-
-| Role | Contributor |
-|---|---|
-| ML + Backend | [@nourchachia](https://github.com/nourchachia) |
-| Frontend | *(teammate — assign here)* |
-
----
-
 ## 📄 Dataset
 
 [MovieLens Small](https://grouplens.org/datasets/movielens/) — 100,000 ratings, 9,000 movies, 600 users.
