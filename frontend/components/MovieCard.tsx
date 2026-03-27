@@ -67,7 +67,6 @@ export default function MovieCard({ movie }: MovieCardProps) {
                 {/* Title + year below card */}
                 <div className="mt-2.5 px-0.5">
                     <p className="text-white text-xs font-semibold truncate leading-snug">{movie.title}</p>
-                    <p className="text-[#A3A3A3] text-[10px] mt-0.5">{movie.year}</p>
                 </div>
             </div>
 

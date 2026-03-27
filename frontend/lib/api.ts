@@ -27,6 +27,20 @@ export interface WatchlistMovie {
   added_at: string;
 }
 
+export type RecommendationType = 'serendipity' | 'collab_dominant' | 'content_dominant';
+
+export interface TopPickMovie {
+  movie_id: number;
+  title: string;
+  genres: string[];
+  tmdb_id: number;
+  match_score: number;
+  reason?: string;
+  is_serendipity?: boolean;
+  recommendation_type?: RecommendationType;
+  poster_url?: string;
+}
+
 // ── Rating endpoints ──────────────────────────────────────────────────────────
 
 /** POST /api/ratings — submit or update a movie rating (1–5) */
@@ -121,9 +135,28 @@ export async function isInWatchlist(
   }
 }
 
+/** GET /api/recommendations/top-picks — personalized recommendations */
+export async function getTopPicks(
+  accessToken: string,
+  options?: { limit?: number; alpha?: number }
+): Promise<{ row_title: string; movies: TopPickMovie[] }> {
+  const url = new URL(`${API}/api/recommendations/top-picks`);
+  if (options?.limit) url.searchParams.set('limit', String(options.limit));
+  if (typeof options?.alpha === 'number') url.searchParams.set('alpha', String(options.alpha));
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.detail ?? 'Failed to fetch top picks');
+  }
+  return res.json();
+}
+
 // ── Watchlist (localStorage — legacy fallback) ────────────────────────────────
 
-const WATCHLIST_KEY    = 'flicker_watchlist';
+const WATCHLIST_KEY = 'flicker_watchlist';
 const LOCAL_RATINGS_KEY = 'flicker_ratings';
 
 export function getWatchlist(): number[] {
@@ -157,6 +190,45 @@ export function setLocalRating(movieId: number, rating: number): void {
 }
 
 // ── Trending API endpoints ──────────────────────────────────────────────────
+
+export interface TrendingMovie {
+  movie_id: number;
+  title: string;
+  genres: string[];
+  tmdb_id: number;
+  trending_score: number;
+}
+
+export interface TrendingResponse {
+  row_title: string;
+  movies: TrendingMovie[];
+}
+
+/**
+ * GET /api/trending — get the top trending movies.
+ * Optionally filter by a category/genre keyword.
+ */
+export async function getTrendingMovies(
+  category?: string,
+  limit: number = 10,
+  mode: 'combined' | 'count' | 'mean' = 'combined'
+): Promise<TrendingResponse> {
+  const url = new URL(`${API}/api/trending`);
+  url.searchParams.set('limit', String(limit));
+  url.searchParams.set('mode', mode);
+  if (category) {
+    url.searchParams.set('category', category);
+  }
+
+  const res = await fetch(url.toString()); // Note: this is a public endpoint
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.detail ?? 'Failed to fetch trending movies');
+  }
+
+  return res.json() as Promise<TrendingResponse>;
+}
+
 export interface TrendingByGenreMovie {
   movie_id: number;
   title: string;
@@ -200,4 +272,37 @@ export async function getTrendingByGenre(
   }
 
   return res.json() as Promise<TrendingByGenreResponse>;
+}
+
+/** Least-misery group recommendation (SVD min across members) */
+export interface GroupRecommendMovie {
+  movie_id: number;
+  title: string;
+  genres: string[];
+  tmdb_id: number;
+  group_score: number;
+  member_predictions: Record<string, number>;
+  strategy: string;
+  reason: string;
+}
+
+export async function getGroupRecommendations(
+  accessToken: string,
+  userIds: number[],
+  options?: { limit?: number; poolSize?: number }
+): Promise<{ strategy: string; user_ids: number[]; limit: number; movies: GroupRecommendMovie[] }> {
+  if (userIds.length < 2) throw new Error('Group needs at least two user ids');
+  const url = new URL(`${API}/api/recommendations/group`);
+  url.searchParams.set('user_ids', userIds.join(','));
+  if (options?.limit) url.searchParams.set('limit', String(options.limit));
+  if (options?.poolSize) url.searchParams.set('pool_size', String(options.poolSize));
+
+  const res = await fetch(url.toString(), {
+    headers: { Authorization: `Bearer ${accessToken}` },
+  });
+  if (!res.ok) {
+    const json = await res.json().catch(() => ({}));
+    throw new Error(json.detail ?? 'Failed to fetch group recommendations');
+  }
+  return res.json();
 }

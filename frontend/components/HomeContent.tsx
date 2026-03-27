@@ -168,15 +168,7 @@ export default function HomeContent({ featured, backdropUrl }: Props) {
                                     lockTitle
                                 />
                             ))
-                        ) : (
-                            <MovieRow 
-                                title="Because You Liked\u2026" 
-                                endpoint="/api/recommendations/because-you-liked"   
-                                params={{ limit: '20', movie_id: String(featured.movie_id) }} 
-                                requiresAuth 
-                                lockTitle
-                            />
-                        )}
+                        ) : null}
                     </div>
 
                     <Footer />

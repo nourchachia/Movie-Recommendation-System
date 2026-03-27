@@ -24,20 +24,28 @@ load_dotenv()
 
 # ── Email Configuration ────────────────────────────────────────────────────────
 # All values come from .env — never hardcode credentials in source code.
-email_conf = ConnectionConfig(
-    MAIL_USERNAME   = os.getenv("MAIL_USERNAME", ""),        # your.email@gmail.com
-    MAIL_PASSWORD   = os.getenv("MAIL_APP_PASSWORD", ""),    # 16-char Gmail App Password
-    MAIL_FROM       = os.getenv("MAIL_FROM", "noreply@flicker.app"),
-    MAIL_FROM_NAME  = "Flicker 🎬",
-    MAIL_PORT       = int(os.getenv("MAIL_PORT", "587")),    # Gmail TLS port
-    MAIL_SERVER     = os.getenv("MAIL_SERVER", "smtp.gmail.com"),
-    MAIL_STARTTLS   = True,   # Encrypt the connection with STARTTLS
-    MAIL_SSL_TLS    = False,  # Do NOT use raw SSL (that's port 465, different)
-    USE_CREDENTIALS = True,
-    VALIDATE_CERTS  = True,
-)
+# Only configure email if credentials are present.
+# If MAIL_USERNAME is empty, all send functions become silent no-ops so the app
+# starts and works without SMTP configured (useful for local/dev environments).
+_mail_enabled = bool(os.getenv("MAIL_USERNAME", "").strip())
 
-fm = FastMail(email_conf)
+if _mail_enabled:
+    email_conf = ConnectionConfig(
+        MAIL_USERNAME   = os.getenv("MAIL_USERNAME", ""),
+        MAIL_PASSWORD   = os.getenv("MAIL_APP_PASSWORD", ""),
+        MAIL_FROM       = os.getenv("MAIL_FROM", "noreply@flicker.app"),
+        MAIL_FROM_NAME  = "Flicker 🎬",
+        MAIL_PORT       = int(os.getenv("MAIL_PORT", "587")),
+        MAIL_SERVER     = os.getenv("MAIL_SERVER", "smtp.gmail.com"),
+        MAIL_STARTTLS   = True,
+        MAIL_SSL_TLS    = False,
+        USE_CREDENTIALS = True,
+        VALIDATE_CERTS  = True,
+    )
+    fm = FastMail(email_conf)
+else:
+    email_conf = None
+    fm = None
 
 
 # ═══════════════════════════════════════════════════════════════
@@ -119,6 +127,8 @@ def _welcome_html(username: str) -> str:
 
 async def send_password_reset_email(to_email: str, reset_link: str) -> None:
     """Send the password reset email. Called from the /auth/forgot-password endpoint."""
+    if not fm:
+        return  # SMTP not configured — skip silently
     message = MessageSchema(
         subject="Reset your Flicker password",
         recipients=[to_email],
@@ -130,6 +140,8 @@ async def send_password_reset_email(to_email: str, reset_link: str) -> None:
 
 async def send_2fa_code_email(to_email: str, code: str) -> None:
     """Send a 6-digit email-based 2FA verification code."""
+    if not fm:
+        return  # SMTP not configured — skip silently
     message = MessageSchema(
         subject="Your Flicker verification code",
         recipients=[to_email],
@@ -141,6 +153,8 @@ async def send_2fa_code_email(to_email: str, code: str) -> None:
 
 async def send_welcome_email(to_email: str, username: str) -> None:
     """Send a welcome email to newly registered users."""
+    if not fm:
+        return  # SMTP not configured — skip silently
     message = MessageSchema(
         subject="Welcome to Flicker 🎬",
         recipients=[to_email],
