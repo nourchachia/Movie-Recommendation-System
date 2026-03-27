@@ -22,3 +22,10 @@ models/
 .vscode/
 .idea/
 .DS_Store
+
+# Node.js / Frontend
+node_modules/
+dist/
+build/
+.next/
+coverage/
