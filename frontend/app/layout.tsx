@@ -2,6 +2,7 @@ import type { Metadata } from 'next';
 import { Inter } from 'next/font/google';
 import './globals.css';
 import { AuthProvider } from '@/context/AuthContext';
+import Chatbot from '@/components/Chatbot';
 
 const inter = Inter({
   subsets: ['latin'],
@@ -33,6 +34,7 @@ export default function RootLayout({
       <body className="antialiased" style={{ background: 'var(--color-bg)' }}>
         <AuthProvider>
           {children}
+          <Chatbot />
         </AuthProvider>
       </body>
     </html>

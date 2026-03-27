@@ -6,6 +6,32 @@
 @source "../app/**/*.{tsx,ts,jsx,js}";
 @source "../lib/**/*.{tsx,ts,jsx,js}";
 
+/*
+  Safelist: force-generate classes used in dynamic template literals or
+  conditional expressions that Tailwind v4's scanner sometimes misses.
+*/
+@source inline("{p,px,py,pt,pb,pl,pr}-{0,1,2,3,4,5,6,8,10,12,14,16,20,24}");
+@source inline("{m,mx,my,mt,mb,ml,mr}-{0,1,2,3,4,5,6,8,10,12,14,16,20,24}");
+@source inline("{w,h,min-w,min-h,max-w,max-h}-{0,4,5,6,8,10,12,14,16,20,24,32,48,64,full,screen,auto}");
+@source inline("{gap,space-x,space-y}-{0,1,2,3,4,5,6,8,10,12}");
+@source inline("text-{xs,sm,base,lg,xl,2xl,3xl,4xl,5xl,6xl}");
+@source inline("font-{thin,light,normal,medium,semibold,bold,extrabold,black}");
+@source inline("rounded-{none,sm,md,lg,xl,2xl,3xl,full}");
+@source inline("border-{0,2,4,neutral-700,neutral-800,transparent}");
+@source inline("{bg,text,border}-{neutral-{400,500,600,700,800,900,950},white,black}");
+@source inline("opacity-{0,20,30,50,60,70,80,90,100}");
+@source inline("{scale,translate-x,translate-y}-{0,50,75,90,95,100,105,110,125,150}");
+@source inline("{flex,inline-flex,grid,block,inline-block,hidden}");
+@source inline("overflow-{auto,hidden,scroll,y-auto,x-auto}");
+@source inline("pointer-events-{none,auto}");
+@source inline("transition-{all,colors,opacity,transform}");
+@source inline("duration-{150,200,300,500}");
+@source inline("{justify,items,self}-{start,end,center,between,around,stretch}");
+@source inline("shrink-{0,1}");
+@source inline("truncate");
+@source inline("sm:{flex,hidden,block,w-0,w-64,overflow-hidden,flex-row,flex-col,max-w-\\[75\\%\\]}");
+@source inline("animate-{spin,pulse,bounce,ping}");
+
 
 :root {
   --color-bg: #0A0A0A;

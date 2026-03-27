@@ -153,7 +153,7 @@ export default function DiscoverPage() {
             {grouped.serendipity.length > 0 && (
               <MovieRow
                 key={`serendipity-${posterVersion}`}
-                title="Serendipity Picks"
+                title="Outside Your comfort zone"
                 movies={toRows(grouped.serendipity)}
                 lockTitle
               />
@@ -161,7 +161,7 @@ export default function DiscoverPage() {
             {grouped.collab_dominant.length > 0 && (
               <MovieRow
                 key={`collab-${posterVersion}`}
-                title="Collaborative Score > Content Score"
+                title="What users like you also liked"
                 movies={toRows(grouped.collab_dominant)}
                 lockTitle
               />
@@ -169,7 +169,7 @@ export default function DiscoverPage() {
             {grouped.content_dominant.length > 0 && (
               <MovieRow
                 key={`content-${posterVersion}`}
-                title="Content Score > Collaborative Score"
+                title="Based on your interests"
                 movies={toRows(grouped.content_dominant)}
                 lockTitle
               />
