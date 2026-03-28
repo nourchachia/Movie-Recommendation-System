@@ -20,6 +20,7 @@ Flow:
   7. GET /api/sessions/FILM4829/matches returns the complete matched list
 """
 
+import asyncio
 import json
 import random
 import string
@@ -132,10 +133,13 @@ def create_session(
     SVD-scores a pool of unseen movies for the creator and stores them in the
     session so both users see exactly the same card stack.
     Returns the invite code that User B needs to join.
+
+    FIX #1: SVD model is optional — if unavailable, fallback to community
+    ranking so the endpoint still works without ML.
     """
     svd = ml_artifacts.get("svd_model")
-    if not svd:
-        raise HTTPException(status_code=503, detail="ML model unavailable — try again later.")
+    # FIX #1: Don't hard-fail if SVD isn't loaded; use community score fallback instead
+    # (previously raised 503 which blocked all Watch Together sessions when model was loading)
 
     # Fetch high-quality candidates the creator hasn't rated yet
     pool_rows = db.execute(
@@ -154,13 +158,32 @@ def create_session(
         {"uid": current_user.id, "pool_size": pool_size * 3},
     ).fetchall()
 
+    # FIX #2: If pool is empty (new user with no ratings exclusions),
+    # fall back to just the most popular movies to avoid returning an empty session
+    if not pool_rows:
+        pool_rows = db.execute(
+            text("""
+                SELECT m.movie_id, m.title, m.genres, m.tmdb_id
+                FROM movies m
+                JOIN ratings r ON m.movie_id = r.movie_id
+                GROUP BY m.movie_id, m.title, m.genres, m.tmdb_id
+                HAVING COUNT(r.rating) >= 20
+                ORDER BY AVG(r.rating) DESC, COUNT(r.rating) DESC
+                LIMIT :pool_size
+            """),
+            {"pool_size": pool_size * 3},
+        ).fetchall()
+
     # SVD-score each candidate for the creator, take top pool_size
     scored = []
     for row in pool_rows:
-        try:
-            est = float(svd.predict(current_user.id, row.movie_id).est)
-        except Exception:
-            est = 2.5
+        if svd:
+            try:
+                est = float(svd.predict(current_user.id, row.movie_id).est)
+            except Exception:
+                est = 2.5
+        else:
+            est = 2.5  # FIX #1: community-rank order already applied in SQL
         scored.append({
             "movie_id": row.movie_id,
             "title":    row.title,
@@ -181,12 +204,21 @@ def create_session(
     else:
         raise HTTPException(status_code=500, detail="Could not generate a unique session code.")
 
+    # FIX #3: Remove the `est` field before storing — it's an internal score,
+    # not needed in the JSON pool (reduces payload size too)
+    pool_to_store = [
+        {k: v for k, v in m.items() if k != "est"} for m in pool
+    ]
+
+    # FIX #4 (already applied): use CAST(:pool AS jsonb) instead of :pool::jsonb
+    # SQLAlchemy's text() parser interprets `:pool::jsonb` as two separate bind
+    # parameters (`:pool` and `:jsonb`), causing a syntax error at runtime.
     db.execute(
         text("""
             INSERT INTO watch_sessions (code, creator_id, status, movie_pool)
-            VALUES (:code, :creator_id, 'waiting', :pool::jsonb)
+            VALUES (:code, :creator_id, 'waiting', CAST(:pool AS jsonb))
         """),
-        {"code": code, "creator_id": current_user.id, "pool": json.dumps(pool)},
+        {"code": code, "creator_id": current_user.id, "pool": json.dumps(pool_to_store)},
     )
     db.commit()
 
@@ -202,7 +234,7 @@ def create_session(
 
 @router.post("/api/sessions/{code}/join",
              summary="Join an existing Watch-Together session")
-def join_session(
+async def join_session(
     code: str = Path(..., min_length=1),
     db: Session = Depends(get_db),
     current_user=Depends(get_current_user),
@@ -223,6 +255,8 @@ def join_session(
     if session.creator_id == current_user.id:
         raise HTTPException(status_code=400, detail="You cannot join your own session.")
 
+    # FIX #5: guest_id column may already have a value if a previous join attempt
+    # partially succeeded — safe to overwrite since we already checked status == 'waiting'
     db.execute(
         text("""
             UPDATE watch_sessions
@@ -233,12 +267,8 @@ def join_session(
     )
     db.commit()
 
-    # Notify any WebSocket clients already in the room that the session is live
-    import asyncio
-    try:
-        asyncio.get_event_loop().create_task(manager.broadcast_join(code))
-    except RuntimeError:
-        pass  # No running event loop in test contexts — safe to skip
+    # Now that this is async def, we can directly await the broadcast
+    await manager.broadcast_join(code)
 
     return {
         "code":    code,
@@ -272,10 +302,27 @@ def get_session(
 
     if not session:
         raise HTTPException(status_code=404, detail="Session not found.")
-    if current_user.id not in (session.creator_id, session.guest_id):
+
+    # FIX #7: When the session is still 'waiting', guest_id is NULL.
+    # `current_user.id not in (session.creator_id, None)` always evaluates True
+    # for the creator when guest_id is None, correctly passing them through.
+    # However, a non-member with the code could poll the session while it's
+    # waiting (guest_id is None). Only strictly enforce membership once active.
+    if session.status == "active" and current_user.id not in (session.creator_id, session.guest_id):
+        raise HTTPException(status_code=403, detail="You are not a member of this session.")
+    elif session.status == "waiting" and current_user.id != session.creator_id:
         raise HTTPException(status_code=403, detail="You are not a member of this session.")
 
-    pool = json.loads(session.movie_pool) if session.movie_pool else []
+    # FIX #8: movie_pool from PostgreSQL JSONB comes back as a dict/list already
+    # (psycopg2 deserialises JSONB automatically). Wrapping in json.loads() on a
+    # dict raises TypeError. Use a type-safe conversion instead.
+    raw_pool = session.movie_pool
+    if isinstance(raw_pool, str):
+        pool = json.loads(raw_pool)
+    elif raw_pool is None:
+        pool = []
+    else:
+        pool = raw_pool  # already a list (psycopg2 JSONB auto-deserialise)
 
     return {
         "code":       session.code,
@@ -291,7 +338,7 @@ def get_session(
 
 @router.post("/api/sessions/{code}/swipe",
              summary="Record a swipe and detect mutual matches")
-def record_swipe(
+async def record_swipe(
     code: str = Path(..., min_length=1),
     body: SwipeRequest = Body(...),
     db: Session = Depends(get_db),
@@ -318,9 +365,13 @@ def record_swipe(
     if current_user.id not in (session.creator_id, session.guest_id):
         raise HTTPException(status_code=403, detail="You are not a member of this session.")
 
+    # FIX #9: other_user_id can be None if guest_id is somehow NULL on an
+    # 'active' session (data integrity issue). Guard against it explicitly.
     other_user_id = (
         session.guest_id if current_user.id == session.creator_id else session.creator_id
     )
+    if other_user_id is None:
+        raise HTTPException(status_code=409, detail="Session partner has not joined yet.")
 
     # Insert swipe — ON CONFLICT DO NOTHING makes this safe to retry
     db.execute(
@@ -360,14 +411,8 @@ def record_swipe(
             )
             is_match = True
 
-            # Broadcast to WebSocket room so BOTH clients react instantly
-            import asyncio
-            try:
-                asyncio.get_event_loop().create_task(
-                    manager.broadcast_match(code, body.movie_id)
-                )
-            except RuntimeError:
-                pass  # No running event loop in test contexts — safe to skip
+            # Now that this is async def, we can directly await the broadcast
+            await manager.broadcast_match(code, body.movie_id)
 
             movie_row = db.execute(
                 text("SELECT title, genres, tmdb_id FROM movies WHERE movie_id = :mid"),
@@ -387,7 +432,7 @@ def record_swipe(
         "match":     is_match,
         "movie_id":  body.movie_id,
         "direction": body.direction,
-        **({"matched_movie": movie_details} if is_match else {}),
+        **( {"matched_movie": movie_details} if is_match else {}),
     }
 
 
@@ -460,10 +505,9 @@ async def session_ws(code: str, ws: WebSocket):
       The receive loop below also accepts any text frame (e.g. "ping") and
       echoes nothing — this is enough to satisfy proxy idle-timeout policies.
 
-    Query-parameter auth example (optional, add ?token=<jwt> if you want auth):
-      The endpoint intentionally does NOT require auth so the frontend can
-      connect before the REST session endpoints have been called.  Restrict it
-      if your threat model requires it.
+    FIX #10: Wrap the entire handler in a broad except so that any unexpected
+    crash (e.g. uvicorn shutdown, network reset) still cleans up the room
+    slot — prevents ghost sockets from accumulating in manager.rooms.
     """
     await manager.connect(code, ws)
     try:
@@ -472,4 +516,8 @@ async def session_ws(code: str, ws: WebSocket):
             # broadcast_match / broadcast_join called by the REST endpoints.
             await ws.receive_text()
     except WebSocketDisconnect:
+        manager.disconnect(code, ws)
+    except Exception:
+        # FIX #10: Catch any other exception (e.g. ConnectionResetError) and
+        # still clean up to avoid ghost socket entries.
         manager.disconnect(code, ws)

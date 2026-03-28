@@ -2,7 +2,7 @@
 
 import { useState, useEffect } from 'react';
 import Link from 'next/link';
-import { Search, Home, TrendingUp, Compass, Bookmark, BookMarked, UserCircle, LogOut } from 'lucide-react';
+import { Search, Home, TrendingUp, Compass, Bookmark, BookMarked, UserCircle, LogOut, Users } from 'lucide-react';
 import { useAuth } from '@/context/AuthContext';
 import SearchOverlay from '@/components/SearchOverlay';
 
@@ -26,12 +26,13 @@ export default function Navbar() {
     ];
 
     const authLinks = [
-        { label: 'Home',      href: '/',          icon: <Home size={15} /> },
-        { label: 'Discover',  href: '/discover',  icon: <Compass size={15} /> },
-        { label: 'Trending',  href: '/trending',  icon: <TrendingUp size={15} /> },
-        { label: 'My List',   href: '/mylist',    icon: <Bookmark size={15} /> },
-        { label: 'Watchlist', href: '/watchlist', icon: <BookMarked size={15} /> },
-        { label: 'Account',   href: '/account',   icon: <UserCircle size={15} /> },
+        { label: 'Home',           href: '/',               icon: <Home size={15} /> },
+        { label: 'Discover',       href: '/discover',       icon: <Compass size={15} /> },
+        { label: 'Trending',       href: '/trending',       icon: <TrendingUp size={15} /> },
+        { label: 'Watch Together', href: '/watch-together', icon: <Users size={15} /> },
+        { label: 'My List',        href: '/mylist',         icon: <Bookmark size={15} /> },
+        { label: 'Watchlist',      href: '/watchlist',      icon: <BookMarked size={15} /> },
+        { label: 'Account',        href: '/account',        icon: <UserCircle size={15} /> },
     ];
 
     const links = user ? authLinks : guestLinks;
