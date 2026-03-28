@@ -98,7 +98,7 @@ def health_check():
 # ==========================================================
 # 4. REGISTER ALL ROUTERS
 # ==========================================================
-from backend.routers import auth, movies, ratings, watchlist, users, chat  # noqa: E402
+from backend.routers import auth, movies, ratings, watchlist, users, chat, sessions  # noqa: E402
 
 app.include_router(auth.router)
 app.include_router(movies.router)
@@ -106,3 +106,4 @@ app.include_router(ratings.router)
 app.include_router(watchlist.router)
 app.include_router(users.router)
 app.include_router(chat.router)
+app.include_router(sessions.router)

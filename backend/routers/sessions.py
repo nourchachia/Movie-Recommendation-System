@@ -7,14 +7,16 @@ Endpoints:
   GET    /api/sessions/{code}              → Poll session state + get movie pool
   POST   /api/sessions/{code}/swipe        → Record a swipe; detects mutual matches
   GET    /api/sessions/{code}/matches      → Get all matched movies
+  WS     /ws/sessions/{code}              → WebSocket room for real-time match events
 
 Flow:
   1. User A  →  POST /api/sessions              → receives code e.g. "FILM4829"
   2. User A shares the code with User B
   3. User B  →  POST /api/sessions/FILM4829/join
-  4. Both poll GET /api/sessions/FILM4829 until status == "active"
+  4. Both connect to WS /ws/sessions/FILM4829, then poll GET until status == "active"
   5. Both swipe via POST /api/sessions/FILM4829/swipe for each card
-  6. When both swipe right on the same movie → {"match": true} → "IT'S A MATCH!" UI
+  6. When both swipe right on the same movie → WS broadcasts {"event":"match","movie_id":...}
+     and the REST response also returns {"match": true}
   7. GET /api/sessions/FILM4829/matches returns the complete matched list
 """
 
@@ -22,7 +24,7 @@ import json
 import random
 import string
 
-from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query
+from fastapi import APIRouter, Body, Depends, HTTPException, Path, Query, WebSocket, WebSocketDisconnect
 from pydantic import BaseModel, Field
 from sqlalchemy import text
 from sqlalchemy.orm import Session
@@ -31,6 +33,73 @@ from backend.core.database import get_db, get_current_user
 from backend.core.state import ml_artifacts
 
 router = APIRouter(tags=["Watch Together"])
+
+
+# ── WebSocket Session Manager ──────────────────────────────────────────────────
+
+class SessionManager:
+    """
+    In-memory WebSocket room manager.
+
+    Each Watch-Together session code maps to a list of connected WebSocket
+    clients.  When a mutual right-swipe happens the swipe endpoint calls
+    `broadcast_match` so *both* clients receive the match event in real time
+    without polling.
+
+    NOTE: this works perfectly for a single-server deployment (Render, Railway,
+    etc.).  For multi-node deployments replace with a Redis pub/sub backend.
+    """
+
+    def __init__(self) -> None:
+        self.rooms: dict[str, list[WebSocket]] = {}
+
+    async def connect(self, code: str, ws: WebSocket) -> None:
+        """Accept the WebSocket handshake and register it in the room."""
+        await ws.accept()
+        self.rooms.setdefault(code, []).append(ws)
+
+    def disconnect(self, code: str, ws: WebSocket) -> None:
+        """Remove a closed socket from the room (no-op if already gone)."""
+        room = self.rooms.get(code, [])
+        if ws in room:
+            room.remove(ws)
+        # Clean up empty rooms to avoid unbounded memory growth
+        if not room:
+            self.rooms.pop(code, None)
+
+    async def broadcast_match(self, code: str, movie_id: int) -> None:
+        """
+        Broadcast a match event to every connected client in the room.
+        Dead sockets are silently purged so one crashed tab doesn't block others.
+        """
+        payload = {"event": "match", "movie_id": movie_id}
+        dead: list[WebSocket] = []
+        for ws in list(self.rooms.get(code, [])):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(code, ws)
+
+    async def broadcast_join(self, code: str) -> None:
+        """
+        Notify all clients that the session is now active (guest has joined).
+        Lets the creator's UI transition from the waiting screen without polling.
+        """
+        payload = {"event": "session_active"}
+        dead: list[WebSocket] = []
+        for ws in list(self.rooms.get(code, [])):
+            try:
+                await ws.send_json(payload)
+            except Exception:
+                dead.append(ws)
+        for ws in dead:
+            self.disconnect(code, ws)
+
+
+# Singleton shared across the whole process
+manager = SessionManager()
 
 
 # ── Helper ─────────────────────────────────────────────────────────────────────
@@ -164,6 +233,13 @@ def join_session(
     )
     db.commit()
 
+    # Notify any WebSocket clients already in the room that the session is live
+    import asyncio
+    try:
+        asyncio.get_event_loop().create_task(manager.broadcast_join(code))
+    except RuntimeError:
+        pass  # No running event loop in test contexts — safe to skip
+
     return {
         "code":    code,
         "status":  "active",
@@ -284,6 +360,15 @@ def record_swipe(
             )
             is_match = True
 
+            # Broadcast to WebSocket room so BOTH clients react instantly
+            import asyncio
+            try:
+                asyncio.get_event_loop().create_task(
+                    manager.broadcast_match(code, body.movie_id)
+                )
+            except RuntimeError:
+                pass  # No running event loop in test contexts — safe to skip
+
             movie_row = db.execute(
                 text("SELECT title, genres, tmdb_id FROM movies WHERE movie_id = :mid"),
                 {"mid": body.movie_id},
@@ -354,3 +439,37 @@ def get_session_matches(
             for r in rows
         ],
     }
+
+
+# ── WebSocket /ws/sessions/{code} ─────────────────────────────────────────────
+
+@router.websocket("/ws/sessions/{code}")
+async def session_ws(code: str, ws: WebSocket):
+    """
+    WebSocket room for a Watch-Together session.
+
+    Clients connect here immediately after creating or joining a session and
+    stay connected for the lifetime of the swipe flow.  The server pushes two
+    event types:
+
+      {"event": "session_active"}          — guest just joined (creator sees this)
+      {"event": "match", "movie_id": 123}  — mutual right-swipe detected
+
+    Client-side keepalive:
+      Browsers automatically handle the WS ping/pong at the transport level.
+      The receive loop below also accepts any text frame (e.g. "ping") and
+      echoes nothing — this is enough to satisfy proxy idle-timeout policies.
+
+    Query-parameter auth example (optional, add ?token=<jwt> if you want auth):
+      The endpoint intentionally does NOT require auth so the frontend can
+      connect before the REST session endpoints have been called.  Restrict it
+      if your threat model requires it.
+    """
+    await manager.connect(code, ws)
+    try:
+        while True:
+            # Receive and discard keepalive frames; real payloads come from
+            # broadcast_match / broadcast_join called by the REST endpoints.
+            await ws.receive_text()
+    except WebSocketDisconnect:
+        manager.disconnect(code, ws)

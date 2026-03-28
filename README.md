@@ -1,68 +1,52 @@
-Movie-Recommendation-System
+# Movie Recommendation System
 
-1-choix du dataset: https://grouplens.org/datasets/movielens/ (ml-latest-small.zip)
+A full-stack movie recommendation platform built with FastAPI and React/Next.js. The system leverages both Content-Based Filtering (using genres and TF-IDF cosine similarity) and Collaborative Filtering (SVD via scikit-surprise) to provide personalized movie suggestions.
 
-2- Document de spécifications fonctionnelles :
+## Features
+- **Personalized Recommendations:** Top picks based on user ratings and watch history.
+- **Content-Based Filtering:** "Similar Movies" row using genre embeddings.
+- **Collaborative Filtering:** Matrix factorization predicting user tastes.
+- **Watchlist & Ratings:** Save movies to watch later and rate them to improve recommendations.
+- **Trending by Genre:** Dynamic rows categorized by the user's favorite genres.
 
-Objectif : recommander films via hybride (content + collaborative).
+## Architecture
+- **Backend:** Python (FastAPI)
+- **Frontend:** Node/React (Streamlit was originally planned but replaced with a modern web frontend)
+- **Machine Learning:** pandas, numpy, scikit-learn, scikit-surprise (TF-IDF, SVD, KNNBaseline)
+- **Dataset:** MovieLens Latest Small (https://grouplens.org/datasets/movielens/)
 
+## Setup Instructions
 
+### Environment Setup
+1. Clone the repository and navigate to the project root.
+2. Create `.env` files in both `backend/` and `frontend/` as needed based on configuration requirements.
 
-Entrées : tables users, movies, ratings, (optionnel : tags, genome-scores).
+### Backend Development
+1. Navigate to the `backend/` directory.
+2. Create a virtual environment:
+   ```bash
+   python -m venv venv
+   source venv/bin/activate  # On Windows: venv\Scripts\activate
+   ```
+3. Install dependencies:
+   ```bash
+   pip install -r requirements.txt
+   ```
+4. Run the FastAPI development server:
+   ```bash
+   uvicorn main:app --reload
+   ```
 
+### Frontend Development
+1. Navigate to the `frontend/` directory.
+2. Install dependencies:
+   ```bash
+   npm install
+   ```
+3. Start the development server:
+   ```bash
+   npm run dev
+   ```
 
-
-Cas d’usage :
-
-
-
-Reco « similar movies » (content-based) : on compare avec le genre et le contenu des filmes entre eux
-
-
-
-Reco « top-K personnalisées » (collaborative: on compare les gouts des gens / SVD)
-
-
-
-Cold-start (nouvel utilisateur / nouveau film) : fallback content-based
-
-
-
-Critères de succès / métriques : précision@K, recall@K, NDCG, RMSE pour prédiction de note.
-
-
-
-Architecture (proposition) : Python backend (FastAPI) + modèle entraîné (pickle) + DB PostgreSQL/pgvector pour embeddings + UI Streamlit.
-
-
-
-Plan de livrables \& échéances : dataset, EDA, modèle baseline (cosine TF-IDF), modèle collab (SVD Surprise), UI Streamlit, rapport. (Mets ces items dans un doc Word / Markdown.)
-
-
-
-📦 Required Packages
-
-This project uses the following Python libraries:
-
-
-
-pandas — data manipulation
-
-numpy — numerical operations
-
-scikit-learn — ML algorithms (TF-IDF, KNN, etc.)
-
-scikit-surprise — collaborative filtering (SVD, KNNBaseline) ///depuis conda-forge
-
-matplotlib — visualizations for EDA
-
-streamlit — simple web interface for the recommender demo
-
-
-
-This project implements a movie recommendation system.
-The first version is based on content-based filtering using movie genres
-and cosine similarity.
-Collaborative filtering using user ratings will be added in future versions.
-
-
+## Contribution
+Check out a branch, make your changes, and create a PR to `main`. Ensure your working directory is clean of ignored packages like `node_modules` or `venv` before pushing.
