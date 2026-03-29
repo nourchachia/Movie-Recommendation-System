@@ -63,16 +63,15 @@ export default function MovieCard({ movie }: MovieCardProps) {
                         </div>
                     </div>
                 </div>
+            </div>
 
-
-
-                {/* ── Modal (portal-style, rendered outside the card) ── */}
-                {modalOpen && (
-                    <MovieModal
-                        movie={movie}
-                        onClose={() => setModalOpen(false)}
-                    />
-                )}
-            </>
-            );
+            {/* ── Modal (portal-style, rendered outside the card) ── */}
+            {modalOpen && (
+                <MovieModal
+                    movie={movie}
+                    onClose={() => setModalOpen(false)}
+                />
+            )}
+        </>
+    );
 }
