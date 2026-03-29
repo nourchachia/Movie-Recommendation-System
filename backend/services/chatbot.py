@@ -111,9 +111,9 @@ TOOLS = [
                     "query": {
                         "type": "string",
                         "description": (
-                            "A keyword or theme to search for in movie titles and genres. "
-                            "Examples: 'time travel heist', 'feel-good family', '90s action'. "
-                            "Use the user's intent, not their raw words — translate slang. "
+                            "A keyword, theme, or mood to search for in movie titles, genres, AND plot keywords. "
+                            "Examples: 'time travel heist', 'redemption friendship', 'dystopian survival', '90s action revenge'. "
+                            "Use the user's intent and emotional themes — translate slang and mood words into thematic keywords. "
                             "If searching by genre alone, leave this empty."
                         )
                     },
@@ -204,7 +204,13 @@ def _execute_search_movies(
         params["genre_pat"] = f"%{genre}%"
 
     if raw_query:
-        query_clause = "(LOWER(m.title) ILIKE :q OR LOWER(m.genres) ILIKE :q)"
+        # FIX: also search the keywords column so thematic queries like
+        # 'redemption friendship' match movies with those plot keywords
+        query_clause = (
+            "(LOWER(m.title) ILIKE :q "
+            "OR LOWER(m.genres) ILIKE :q "
+            "OR LOWER(COALESCE(m.keywords, '')) ILIKE :q)"
+        )
         params["q"] = f"%{raw_query.lower()}%"
 
     # Combine: if both provided, either matching is enough (OR)
@@ -223,12 +229,13 @@ def _execute_search_movies(
             m.title,
             m.genres,
             m.tmdb_id,
+            m.keywords,
             ROUND(AVG(r.rating)::numeric, 2) AS avg_rating,
             COUNT(r.rating)                  AS rating_count
         FROM movies m
         JOIN ratings r ON m.movie_id = r.movie_id
         WHERE {where_sql}
-        GROUP BY m.movie_id, m.title, m.genres, m.tmdb_id
+        GROUP BY m.movie_id, m.title, m.genres, m.tmdb_id, m.keywords
         HAVING AVG(r.rating) >= :min_rating AND COUNT(r.rating) > 5
         ORDER BY avg_rating DESC, rating_count DESC
         LIMIT :limit
@@ -249,13 +256,13 @@ def _execute_search_movies(
             fallback_params["genre_pat"] = f"%{genre}%"
             fallback_where += " AND m.genres ILIKE :genre_pat"
         fallback_sql = f"""
-            SELECT m.movie_id, m.title, m.genres, m.tmdb_id,
+            SELECT m.movie_id, m.title, m.genres, m.tmdb_id, m.keywords,
                    ROUND(AVG(r.rating)::numeric, 2) AS avg_rating,
                    COUNT(r.rating) AS rating_count
             FROM movies m
             JOIN ratings r ON m.movie_id = r.movie_id
             WHERE {fallback_where}
-            GROUP BY m.movie_id, m.title, m.genres, m.tmdb_id
+            GROUP BY m.movie_id, m.title, m.genres, m.tmdb_id, m.keywords
             HAVING AVG(r.rating) >= :min_rating AND COUNT(r.rating) > 5
             ORDER BY avg_rating DESC, rating_count DESC
             LIMIT :limit
@@ -278,11 +285,14 @@ def _execute_search_movies(
 
     movies = [
         {
-            "movie_id":    r.movie_id,
-            "title":       r.title,
-            "genres":      r.genres.split("|") if r.genres else [],
-            "avg_rating":  float(r.avg_rating),
+            "movie_id":      r.movie_id,
+            "title":         r.title,
+            "genres":        r.genres.split("|") if r.genres else [],
+            "avg_rating":    float(r.avg_rating),
             "total_ratings": int(r.rating_count),
+            # Include top 8 keywords so LLM can reason about themes/mood
+            # e.g. 'time travel, friendship, redemption' helps it match user intent
+            "keywords":      (r.keywords or "").split(",")[:8] if r.keywords else [],
         }
         for r in rows
     ]

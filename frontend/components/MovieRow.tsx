@@ -33,8 +33,8 @@ interface MovieRowProps {
 // ── Skeleton card ─────────────────────────────────────────────────────────────
 function SkeletonCard() {
     return (
-        <div style={{
-            flexShrink: 0, width: '160px', borderRadius: '10px',
+        <div className="flex-shrink-0 w-52 md:w-64" style={{
+            borderRadius: '10px',
             background: 'rgba(255,255,255,0.06)', aspectRatio: '2/3',
             animation: 'rowPulse 1.5s ease-in-out infinite',
         }} />
@@ -125,12 +125,46 @@ export default function MovieRow({
     if (requiresAuth && !authLoading && !accessToken) return null;
 
     return (
-        <section className="relative py-4 group/row">
+        <section className="relative group/row" style={{ paddingTop: '32px', paddingBottom: '32px' }}>
             {/* Row header */}
-            <div className="flex items-center justify-between mb-4 px-8 md:px-16">
-                <h2 className="text-white text-lg md:text-xl font-bold tracking-tight">{rowTitle}</h2>
-                <button className="text-[#A3A3A3] hover:text-[#E50914] text-xs font-semibold uppercase tracking-widest transition-colors">
-                    See All
+            <div className="flex items-center justify-between px-8 md:px-16" style={{ marginBottom: '24px' }}>
+                {/* Title with red left accent bar */}
+                <div style={{ display: 'flex', alignItems: 'center', gap: '14px' }}>
+                    <span style={{
+                        display: 'block',
+                        width: '4px',
+                        height: '28px',
+                        borderRadius: '2px',
+                        background: 'linear-gradient(to bottom, #E50914, #ff6b6b)',
+                        flexShrink: 0,
+                        boxShadow: '0 0 8px rgba(229,9,20,0.6)',
+                    }} />
+                    <h4 style={{
+                        fontSize: '1.5rem',
+                        fontWeight: '700',
+                        letterSpacing: '0.02em',
+                        background: 'linear-gradient(90deg, #ffffff 60%, #a3a3a3 100%)',
+                        WebkitBackgroundClip: 'text',
+                        WebkitTextFillColor: 'transparent',
+                        backgroundClip: 'text',
+                        margin: 0,
+                    }}>{rowTitle}</h4>
+                </div>
+                <button style={{
+                    color: '#a3a3a3',
+                    fontSize: '11px',
+                    fontWeight: '600',
+                    letterSpacing: '0.1em',
+                    textTransform: 'uppercase',
+                    transition: 'color 0.2s',
+                    background: 'none',
+                    border: 'none',
+                    cursor: 'pointer',
+                }}
+                    onMouseEnter={e => (e.currentTarget.style.color = '#E50914')}
+                    onMouseLeave={e => (e.currentTarget.style.color = '#a3a3a3')}
+                >
+                    See All →
                 </button>
             </div>
 
@@ -148,7 +182,7 @@ export default function MovieRow({
                 </button>
 
                 {/* Cards */}
-                <div ref={scrollRef} className="flex gap-3 md:gap-4 overflow-x-auto scrollbar-hide px-8 md:px-16 pb-2">
+                <div ref={scrollRef} className="flex overflow-x-auto scrollbar-hide px-8 md:px-16 pb-2" style={{ gap: '24px' }}>
                     {loading
                         ? Array.from({ length: 8 }).map((_, i) => <SkeletonCard key={i} />)
                         : movies.map((movie) => <MovieCard key={movie.movie_id} movie={movie} />)

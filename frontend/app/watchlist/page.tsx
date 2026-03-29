@@ -82,6 +82,42 @@ function WatchlistCard({
             View Details
           </div>
         </div>
+
+        {/* Note strip — pinned to bottom of poster */}
+        {movie.note && (
+          <div
+            style={{
+              position: 'absolute', bottom: 0, left: 0, right: 0,
+              background: 'rgba(251,191,36,0.92)',
+              backdropFilter: 'blur(4px)',
+              padding: '5px 8px',
+              display: 'flex', alignItems: 'flex-start', gap: '5px',
+            }}
+          >
+            {/* pin icon */}
+            <svg
+              xmlns="http://www.w3.org/2000/svg"
+              width="10" height="10"
+              viewBox="0 0 24 24"
+              fill="#92400e"
+              style={{ flexShrink: 0, marginTop: '1px' }}
+            >
+              <path d="M12 2a7 7 0 0 1 7 7c0 5.25-7 13-7 13S5 14.25 5 9a7 7 0 0 1 7-7zm0 9.5a2.5 2.5 0 1 0 0-5 2.5 2.5 0 0 0 0 5z"/>
+            </svg>
+            <span
+              style={{
+                fontSize: '10px', lineHeight: 1.35,
+                color: '#1c1917', fontWeight: 600,
+                overflow: 'hidden',
+                display: '-webkit-box',
+                WebkitLineClamp: 2,
+                WebkitBoxOrient: 'vertical',
+              }}
+            >
+              {movie.note}
+            </span>
+          </div>
+        )}
       </div>
 
       {/* Info + Remove */}

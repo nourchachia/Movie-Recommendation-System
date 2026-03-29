@@ -22,7 +22,7 @@ export default function MovieCard({ movie }: MovieCardProps) {
         <>
             {/* ── Card ── */}
             <div
-                className="relative flex-shrink-0 w-[160px] md:w-[180px] group cursor-pointer"
+                className="relative flex-shrink-0 w-52 md:w-64 group cursor-pointer"
                 onClick={() => setModalOpen(true)}
                 role="button"
                 tabIndex={0}

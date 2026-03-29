@@ -12,6 +12,100 @@ import {
   transcribeAudio, clearAllChatHistory
 } from '@/lib/chat';
 
+// ── Lightweight inline markdown renderer ─────────────────────────────────────
+// Handles: **bold**, *italic*, `code`, bullet lists (- / •), numbered lists,
+// and ### headings. No external deps needed.
+function renderMarkdown(text: string): React.ReactNode {
+  // Split into lines to handle block-level elements
+  const lines = text.split('\n');
+  const elements: React.ReactNode[] = [];
+
+  let i = 0;
+  while (i < lines.length) {
+    const line = lines[i];
+
+    // ### Heading
+    if (/^###\s+/.test(line)) {
+      elements.push(
+        <p key={i} className="font-bold text-white text-sm mb-1 mt-2">
+          {renderInline(line.replace(/^###\s+/, ''))}
+        </p>
+      );
+      i++;
+      continue;
+    }
+
+    // Bullet list item  (- text  or  • text)
+    if (/^[-•]\s+/.test(line)) {
+      const items: React.ReactNode[] = [];
+      while (i < lines.length && /^[-•]\s+/.test(lines[i])) {
+        items.push(
+          <li key={i} className="ml-1">{renderInline(lines[i].replace(/^[-•]\s+/, ''))}</li>
+        );
+        i++;
+      }
+      elements.push(
+        <ul key={`ul-${i}`} className="list-disc list-inside space-y-0.5 my-1">{items}</ul>
+      );
+      continue;
+    }
+
+    // Numbered list item  (1. text)
+    if (/^\d+\.\s+/.test(line)) {
+      const items: React.ReactNode[] = [];
+      while (i < lines.length && /^\d+\.\s+/.test(lines[i])) {
+        items.push(
+          <li key={i} className="ml-1">{renderInline(lines[i].replace(/^\d+\.\s+/, ''))}</li>
+        );
+        i++;
+      }
+      elements.push(
+        <ol key={`ol-${i}`} className="list-decimal list-inside space-y-0.5 my-1">{items}</ol>
+      );
+      continue;
+    }
+
+    // Empty line → small spacer
+    if (line.trim() === '') {
+      elements.push(<br key={i} />);
+      i++;
+      continue;
+    }
+
+    // Regular paragraph
+    elements.push(<p key={i} className="mb-0.5">{renderInline(line)}</p>);
+    i++;
+  }
+
+  return <>{elements}</>;
+}
+
+// Renders inline spans: **bold**, *italic*, `code`
+function renderInline(text: string): React.ReactNode {
+  // Combined regex: **bold** | *italic* | `code`
+  const parts = text.split(/(\*\*[^*]+\*\*|\*[^*]+\*|`[^`]+`)/);
+  return (
+    <>
+      {parts.map((part, idx) => {
+        if (/^\*\*[^*]+\*\*$/.test(part)) {
+          return <strong key={idx} className="font-semibold text-white">{part.slice(2, -2)}</strong>;
+        }
+        if (/^\*[^*]+\*$/.test(part)) {
+          return <em key={idx} className="italic text-neutral-300">{part.slice(1, -1)}</em>;
+        }
+        if (/^`[^`]+`$/.test(part)) {
+          return (
+            <code key={idx} className="bg-neutral-700 text-[#E50914] rounded px-1 py-0.5 text-xs font-mono">
+              {part.slice(1, -1)}
+            </code>
+          );
+        }
+        return <span key={idx}>{part}</span>;
+      })}
+    </>
+  );
+}
+
 export default function Chatbot() {
   const { user, accessToken } = useAuth();
 
@@ -82,7 +176,7 @@ export default function Chatbot() {
       await fetchSessions();
       setActiveSessionId(data.session_id);
       setMessages([{ role: 'assistant', content: data.welcome, created_at: new Date().toISOString() }]);
-      setIsSidebarOpen(false); // hide sidebar on mobile automatically
+      if (window.innerWidth < 640) setIsSidebarOpen(false); // auto-collapse on mobile only
     } catch (e) {
       console.error(e);
     } finally {
@@ -241,7 +335,7 @@ export default function Chatbot() {
                   sessions.map(s => (
                     <div
                       key={s.session_id}
-                      onClick={() => { setActiveSessionId(s.session_id); setIsSidebarOpen(false); }}
+                      onClick={() => { setActiveSessionId(s.session_id); if (window.innerWidth < 640) setIsSidebarOpen(false); }}
                       className={`group flex items-center justify-between rounded-xl mb-1 cursor-pointer transition-colors ${activeSessionId === s.session_id ? 'bg-[#E50914]/20 text-[#E50914]' : 'hover:bg-neutral-800 text-neutral-400'}`}
                       style={{ padding: '12px' }}
                     >
@@ -270,12 +364,12 @@ export default function Chatbot() {
             </div>
 
             {/* Main Chat Area */}
-            <div className={`flex-1 flex flex-col bg-neutral-900 ${isSidebarOpen ? 'hidden sm:flex' : 'flex'}`}>
+            <div className={`flex-1 min-h-0 flex flex-col bg-neutral-900 ${isSidebarOpen ? 'hidden sm:flex' : 'flex'}`}>
 
               {/* Header */}
               <div className="h-16 shrink-0 border-b border-neutral-800 bg-neutral-900/50 backdrop-blur-md flex items-center justify-between" style={{ padding: '0 16px' }}>
                 <div className="flex items-center gap-3">
-                  <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="sm:hidden text-neutral-400 hover:text-white transition">
+                  <button onClick={() => setIsSidebarOpen(!isSidebarOpen)} className="text-neutral-400 hover:text-white transition">
                     <Menu size={24} />
                   </button>
                   <div className="flex items-center gap-2">
@@ -294,7 +388,7 @@ export default function Chatbot() {
               </div>
 
               {/* Messages Area */}
-              <div className="flex-1 overflow-y-auto space-y-6 scrollbar-thin scrollbar-thumb-neutral-700" style={{ padding: '24px' }}>
+              <div className="flex-1 min-h-0 overflow-y-auto space-y-6 scrollbar-thin scrollbar-thumb-neutral-700" style={{ padding: '24px' }}>
                 {!activeSessionId && messages.length === 0 ? (
                   <div className="h-full flex flex-col items-center justify-center text-center text-neutral-500 space-y-4 max-w-sm mx-auto">
                     <div className="w-16 h-16 rounded-full bg-neutral-800 flex items-center justify-center text-neutral-600 mb-2">
@@ -317,9 +411,9 @@ export default function Chatbot() {
                               : 'bg-neutral-800 text-neutral-200 rounded-bl-sm border border-neutral-700 shadow-sm'
                             }
                           `}
-                          style={{ padding: '12px 16px', whiteSpace: 'pre-wrap', wordBreak: 'break-word' }}
+                          style={{ padding: '12px 16px', wordBreak: 'break-word' }}
                         >
-                          {msg.content}
+                          {msg.role === 'assistant' ? renderMarkdown(msg.content) : msg.content}
                         </div>
                       </div>
                     ))}
