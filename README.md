@@ -6,14 +6,18 @@ A full-stack movie recommendation platform built with FastAPI and React/Next.js.
 - **Personalized Recommendations:** Top picks based on user ratings and watch history.
 - **Content-Based Filtering:** "Similar Movies" row using genre embeddings.
 - **Collaborative Filtering:** Matrix factorization predicting user tastes.
-- **Watchlist & Ratings:** Save movies to watch later and rate them to improve recommendations.
+- **Watchlist & Ratings:** Save movies to watch later, rate them, and add personal notes to track your thoughts.
 - **Trending by Genre:** Dynamic rows categorized by the user's favorite genres.
+- **Flicker AI Chatbot:** Context-aware AI assistant with movie keyword integration and voice responses powered by Grok Text-to-Speech (TTS).
+- **Watch Together:** Tinder-like swiping to find a movie to watch with a friend, powered by combined SVD recommendation scores and real-time synchronization.
 
 ## Architecture
 - **Backend:** Python (FastAPI)
-- **Frontend:** Node/React (Streamlit was originally planned but replaced with a modern web frontend)
-- **Machine Learning:** pandas, numpy, scikit-learn, scikit-surprise (TF-IDF, SVD, KNNBaseline)
+- **Frontend:** Next.js (React) and Tailwind CSS
+- **Database:** PostgreSQL (via Neon) with `pgvector` for embeddings
+- **Machine Learning & AI:** pandas, numpy, scikit-learn, scikit-surprise (TF-IDF, SVD), SentenceTransformers, Groq/xAI API (Grok Speech-to-Text)
 - **Dataset:** MovieLens Latest Small (https://grouplens.org/datasets/movielens/)
+- **Real-time:** WebSockets for instant watch-together swipe matching
 
 ## Setup Instructions
 
